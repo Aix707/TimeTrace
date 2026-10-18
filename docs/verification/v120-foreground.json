@@ -1,0 +1,24 @@
+{
+  "iterations": 100,
+  "successful_focus_changes": 100,
+  "applications": [
+    {
+      "application": "ProbeA.exe",
+      "expected_ms": 30538,
+      "recorded_ms": 30557,
+      "error_ms": 19,
+      "recorded_intervals": 50
+    },
+    {
+      "application": "ProbeB.exe",
+      "expected_ms": 30478,
+      "recorded_ms": 30537,
+      "error_ms": 59,
+      "recorded_intervals": 50
+    }
+  ],
+  "passed": true,
+  "reference": "Independent 2 ms foreground polling; excludes intervening third-party focus changes.",
+  "note": "Controlled native windows, two executable paths; does not establish compatibility with every third-party application.",
+  "binary_sha256": "A5F05227E8A43C307E701F0224356ABC12D233D623318B040B7F26D369E0D59B"
+}
