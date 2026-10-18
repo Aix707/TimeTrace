@@ -1,0 +1,14 @@
+/build/
+/tools/
+/test-output/
+/dist/
+*.user
+*.db
+*.db-wal
+*.db-shm
+__pycache__/
+.vs/
+.env
+.env.*
+*.pem
+*.pfx
