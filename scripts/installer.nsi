@@ -45,19 +45,32 @@ FunctionEnd
 Section "TimeTrace" SEC_APP
     SetShellVarContext current
     SetRegView 64
-    IfFileExists "$INSTDIR\TimeTrace.exe" 0 +2
-      ExecWait '"$INSTDIR\TimeTrace.exe" --stop'
-    SetOutPath "$INSTDIR"
-    File "..\dist\TimeTrace.exe"
-    File "..\LICENSE.txt"
-    File "..\README.md"
-    ; Also stop an older copy running from a different folder for this same user profile.
-    ExecWait '"$INSTDIR\TimeTrace.exe" --stop' $0
-    ${If} $0 == 5
+    ; Stage the new executable so a running copy is stopped before any installed file changes.
+    InitPluginsDir
+    File /oname=$PLUGINSDIR\TimeTrace.exe "..\dist\TimeTrace.exe"
+    ClearErrors
+    ExecWait '"$PLUGINSDIR\TimeTrace.exe" --stop' $0
+    ${If} ${Errors}
+      MessageBox MB_OK|MB_ICONSTOP "无法关闭 TimeTrace。请退出后重新安装。"
+      SetErrorLevel 1
+      Abort
+    ${EndIf}
+    ${If} $0 != 0
+    ${AndIf} $0 != 2
       MessageBox MB_OK|MB_ICONSTOP "TimeTrace 仍在保存数据。请稍后重新安装。"
       SetErrorLevel 1
       Abort
     ${EndIf}
+    SetOutPath "$INSTDIR"
+    ClearErrors
+    CopyFiles /SILENT "$PLUGINSDIR\TimeTrace.exe" "$INSTDIR\TimeTrace.exe"
+    ${If} ${Errors}
+      MessageBox MB_OK|MB_ICONSTOP "无法更新程序文件。请退出 TimeTrace 后重新安装。"
+      SetErrorLevel 1
+      Abort
+    ${EndIf}
+    File "..\LICENSE.txt"
+    File "..\README.md"
     WriteUninstaller "$INSTDIR\Uninstall.exe"
     ExecWait '"$INSTDIR\TimeTrace.exe" --register-install' $0
     ${If} $0 != 0
@@ -72,7 +85,21 @@ Section "Uninstall"
     ; Remove shared registration only when this installation is still its owner.
     ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\TimeTrace" "InstallLocation"
     StrCmp $0 $INSTDIR 0 keep_registration
-    ExecWait '"$INSTDIR\TimeTrace.exe" --stop'
+    IfFileExists "$INSTDIR\TimeTrace.exe" 0 stopped
+    ClearErrors
+    ExecWait '"$INSTDIR\TimeTrace.exe" --stop' $0
+    ${If} ${Errors}
+      MessageBox MB_OK|MB_ICONSTOP "无法关闭 TimeTrace。请退出后重新卸载。"
+      SetErrorLevel 1
+      Abort
+    ${EndIf}
+    ${If} $0 != 0
+    ${AndIf} $0 != 2
+      MessageBox MB_OK|MB_ICONSTOP "TimeTrace 仍在保存数据。请稍后重新卸载。"
+      SetErrorLevel 1
+      Abort
+    ${EndIf}
+stopped:
     Delete "$SMPROGRAMS\TimeTrace.lnk"
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "TimeTrace"
     DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\TimeTrace"

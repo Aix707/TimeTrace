@@ -1,5 +1,6 @@
 #pragma once
 #include "storage.h"
+#include "identity.h"
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -39,12 +40,15 @@ struct Command {
     bool enabled{true};
     ReminderAction action;
     uint64_t request{};
+    std::vector<std::string> iconApps;
+    size_t iconCount{16};
 };
 class AppResolver {
   public:
     AppResolver();
     ~AppResolver();
-    AppInfo resolve(HWND window, DWORD pid);
+    ResolvedApp resolve(HWND window, DWORD pid);
+    ResolvedApp identify(const AppInfo &app);
 
   private:
     struct Impl;
@@ -55,6 +59,7 @@ class Service {
     Service(std::filesystem::path directory, HWND target);
     ~Service();
     void send(Command command);
+    bool finish();
 
   private:
     std::filesystem::path directory_;
@@ -63,6 +68,7 @@ class Service {
     std::condition_variable ready_;
     std::deque<Command> queue_;
     std::atomic<bool> alive_{true};
+    std::atomic<bool> shutdownSaved_{};
     std::thread thread_;
     void run();
 };

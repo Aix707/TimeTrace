@@ -30,6 +30,8 @@ class Ui {
     std::filesystem::path directory_;
     Snapshot snapshot_;
     uint64_t request_{};
+    std::vector<std::string> requestedIconApps_;
+    size_t requestedIconCount_{};
     int page_{}, scroll_{}, focus_{-1}, hover_{-1};
     bool weekly_{}, followToday_{true};
     std::string day_, selected_;
@@ -63,6 +65,9 @@ class Ui {
                         float top, bool showApp);
     void reminderActions(ui::Canvas &canvas, float right, float top, const std::string &app = {});
     int hitAt(float x, float y) const;
+    int listCapacity(float height) const;
+    std::vector<std::string> visibleIconApps() const;
+    void refreshVisibleIcons();
 
     void paint();
     void draw(ID2D1RenderTarget *rt, float width, float height);

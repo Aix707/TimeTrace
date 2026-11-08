@@ -1,0 +1,13 @@
+{
+  "target_schema": 5,
+  "original_intervals": 5968,
+  "all_original_intervals_identical": true,
+  "original_labels_preserved": true,
+  "manual_groups_preserved": true,
+  "integrity_ok": true,
+  "foreign_keys_ok": true,
+  "passed": true,
+  "installed_bytes": 1251221.0,
+  "version": "1.3.0",
+  "binary_sha256": "5076DE87DF3B4E5FE8EFDB19D9DAC07A456C42B5D43EEE4DFFEC83DA5CECA41F"
+}

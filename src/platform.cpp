@@ -4,6 +4,9 @@
 #include <appmodel.h>
 #include <cwctype>
 #include <memory>
+#include <propkey.h>
+#include <propvarutil.h>
+#include <propsys.h>
 #include <shellapi.h>
 
 #include <winver.h>
@@ -90,44 +93,80 @@ std::shared_ptr<void> loadAppIcon(const std::wstring &path) {
 struct ProcessEntry {
     HANDLE handle{};
     AppInfo app;
+    ExecutableMetadata metadata;
+    std::wstring appId;
     ~ProcessEntry() {
         if (handle)
             CloseHandle(handle);
     }
 };
-static std::wstring description(const std::wstring &path) {
-    DWORD ignored{}, size = GetFileVersionInfoSizeW(path.c_str(), &ignored);
-    if (!size || size > 2 * 1024 * 1024)
+static std::wstring windowAppId(HWND window) {
+    if (!window)
         return {};
-    std::vector<BYTE> buffer(size);
-    if (!GetFileVersionInfoW(path.c_str(), 0, size, buffer.data()))
-        return {};
-    struct Translation {
-        WORD language, codepage;
-    };
-    Translation *trans{};
-    UINT length{};
-    if (VerQueryValueW(buffer.data(), L"\\VarFileInfo\\Translation",
-                       reinterpret_cast<void **>(&trans), &length) &&
-        length >= sizeof(Translation)) {
-        wchar_t key[128]{};
-        swprintf_s(key, L"\\StringFileInfo\\%04x%04x\\FileDescription", trans[0].language,
-                   trans[0].codepage);
-        wchar_t *text{};
-        if (VerQueryValueW(buffer.data(), key, reinterpret_cast<void **>(&text), &length) && text &&
-            length > 1)
-            return std::wstring(text).substr(0, 160);
+    IPropertyStore *properties{};
+    std::wstring result;
+    if (SUCCEEDED(SHGetPropertyStoreForWindow(window, IID_PPV_ARGS(&properties)))) {
+        PROPVARIANT value{};
+        if (SUCCEEDED(properties->GetValue(PKEY_AppUserModel_ID, &value))) {
+            PWSTR text{};
+            if (SUCCEEDED(PropVariantToStringAlloc(value, &text)) && text) {
+                result = text;
+                CoTaskMemFree(text);
+            }
+        }
+        PropVariantClear(&value);
+        properties->Release();
     }
-    return {};
+    return result.size() <= 512 ? result : L"";
 }
 struct AppResolver::Impl {
     std::unordered_map<DWORD, std::unique_ptr<ProcessEntry>> cache_;
+    std::unordered_map<std::wstring, ExecutableMetadata> metadata_;
+    IdentityCatalog catalog_;
     std::string session_ = std::to_string(utcNow());
 
+    ExecutableMetadata metadata(const std::wstring &path) {
+        auto key = identityPath(path);
+        auto found = metadata_.find(key);
+        if (found != metadata_.end())
+            return found->second;
+        auto info = executableMetadata(path);
+        // Missing or newly installed paths can become accessible on a later observation.
+        if (info.exists) {
+            if (metadata_.size() >= 256)
+                metadata_.erase(metadata_.begin());
+            metadata_[key] = info;
+        }
+        return info;
+    }
+    ResolvedApp frame(HWND hwnd, DWORD pid, const std::wstring &appId) {
+        AppInfo source{"unknown-frame:" + std::to_string(pid) + ":" +
+                           std::to_string(reinterpret_cast<uintptr_t>(hwnd)) + ":" + session_,
+                       L"未识别的系统应用窗口",
+                       {}};
+        if (!appId.empty())
+            source.id = "aumid:" + utf8(appId);
+        return catalog_.identify(source, {{}, appId, !appId.empty()});
+    }
+
   public:
-    AppInfo resolve(HWND hwnd, DWORD pid) {
+    ResolvedApp identify(const AppInfo &source) {
+        return catalog_.identify(source, {metadata(source.path), {}, false});
+    }
+    ResolvedApp resolve(HWND hwnd, DWORD pid) {
         if (!pid)
             return {};
+        DWORD windowPid{};
+        if (hwnd && (!GetWindowThreadProcessId(hwnd, &windowPid) || windowPid != pid))
+            hwnd = nullptr;
+        auto appId = windowAppId(hwnd);
+        if (appId.empty() && hwnd) {
+            auto owner = GetAncestor(hwnd, GA_ROOTOWNER);
+            DWORD ownerPid{};
+            GetWindowThreadProcessId(owner, &ownerPid);
+            if (owner != hwnd && ownerPid == pid)
+                appId = windowAppId(owner);
+        }
         wchar_t cls[128]{};
         if (hwnd)
             GetClassNameW(hwnd, cls, 128);
@@ -154,70 +193,85 @@ struct AppResolver::Impl {
             if (child.result)
                 pid = child.result;
             else
-                return {"unknown-frame:" + std::to_string(pid) + ":" +
-                            std::to_string(reinterpret_cast<uintptr_t>(hwnd)) + ":" + session_,
-                        L"未识别的系统应用窗口",
-                        {}};
+                return frame(hwnd, pid, appId);
         }
         auto found = cache_.find(pid);
         if (found != cache_.end()) {
-            if (found->second->handle &&
-                WaitForSingleObject(found->second->handle, 0) == WAIT_TIMEOUT)
-                return found->second->app;
-            cache_.erase(found);
-        }
-        if (cache_.size() >= 128)
-            cache_.erase(cache_.begin());
-        auto entry = std::make_unique<ProcessEntry>();
-        entry->handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
-        std::wstring path(entry->handle ? 32768 : 0, 0);
-        DWORD length = static_cast<DWORD>(path.size());
-        if (entry->handle && QueryFullProcessImageNameW(entry->handle, 0, path.data(), &length)) {
-            path.resize(length);
-            auto filename = std::filesystem::path(path).filename().wstring();
-            if (_wcsicmp(filename.c_str(), L"ApplicationFrameHost.exe") == 0)
-                return {"unknown-frame:" + std::to_string(pid) + ":" +
-                            std::to_string(reinterpret_cast<uintptr_t>(hwnd)) + ":" + session_,
-                        L"未识别的系统应用窗口",
-                        {}};
-            entry->app.path = path;
-            auto normalized = path;
-            std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-                           [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
-            entry->app.id = "exe:" + utf8(normalized);
-            UINT32 size{};
-            if (GetApplicationUserModelId(entry->handle, &size, nullptr) ==
-                    ERROR_INSUFFICIENT_BUFFER &&
-                size > 1 && size < 32768) {
-                std::wstring aumid(size, 0);
-                if (GetApplicationUserModelId(entry->handle, &size, aumid.data()) ==
-                    ERROR_SUCCESS) {
-                    aumid.resize(size - 1);
-                    entry->app.id = "aumid:" + utf8(aumid);
-                }
+            if (!found->second->handle ||
+                WaitForSingleObject(found->second->handle, 0) != WAIT_TIMEOUT) {
+                cache_.erase(found);
+                found = cache_.end();
             }
-            entry->app.name = description(path);
-            if (entry->app.name.empty())
-                entry->app.name = std::filesystem::path(path).stem().wstring();
+        }
+        std::unique_ptr<ProcessEntry> fresh;
+        ProcessEntry *entry{};
+        if (found != cache_.end()) {
+            entry = found->second.get();
         } else {
-            FILETIME created{}, exit{}, kernel{}, user{};
-            std::string birth = session_;
-            if (entry->handle && GetProcessTimes(entry->handle, &created, &exit, &kernel, &user))
-                birth = std::to_string((static_cast<uint64_t>(created.dwHighDateTime) << 32) |
-                                       created.dwLowDateTime);
-            entry->app.id = "unknown:" + std::to_string(pid) + ":" + birth;
-            entry->app.name = L"未识别应用 · PID " + std::to_wstring(pid);
+            fresh = std::make_unique<ProcessEntry>();
+            entry = fresh.get();
+            entry->handle =
+                OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+            std::wstring path(entry->handle ? 32768 : 0, 0);
+            DWORD length = static_cast<DWORD>(path.size());
+            if (entry->handle &&
+                QueryFullProcessImageNameW(entry->handle, 0, path.data(), &length)) {
+                path.resize(length);
+                auto filename = std::filesystem::path(path).filename().wstring();
+                if (_wcsicmp(filename.c_str(), L"ApplicationFrameHost.exe") == 0)
+                    return frame(hwnd, pid, appId);
+                entry->app.path = path;
+                entry->app.id = "exe:" + utf8(identityPath(path));
+                if (entry->app.id == "exe:") {
+                    auto lowered = path;
+                    std::transform(lowered.begin(), lowered.end(), lowered.begin(), towlower);
+                    entry->app.id += utf8(lowered);
+                }
+                UINT32 size{};
+                if (GetApplicationUserModelId(entry->handle, &size, nullptr) ==
+                        ERROR_INSUFFICIENT_BUFFER &&
+                    size > 1 && size <= 512) {
+                    std::wstring id(size, 0);
+                    if (GetApplicationUserModelId(entry->handle, &size, id.data()) ==
+                        ERROR_SUCCESS) {
+                        id.resize(size - 1);
+                        entry->appId = id;
+                        entry->app.id = "aumid:" + utf8(id);
+                    }
+                }
+                entry->metadata = metadata(path);
+                entry->app.name = executableDisplayName(entry->metadata, path);
+            } else {
+                FILETIME created{}, exit{}, kernel{}, user{};
+                std::string birth = session_;
+                if (entry->handle &&
+                    GetProcessTimes(entry->handle, &created, &exit, &kernel, &user))
+                    birth = std::to_string((static_cast<uint64_t>(created.dwHighDateTime) << 32) |
+                                           created.dwLowDateTime);
+                entry->app.id = "unknown:" + std::to_string(pid) + ":" + birth;
+                entry->app.name = L"未识别应用";
+            }
         }
         auto app = entry->app;
-        // An inaccessible process cannot be safely reused by PID. Do not cache it.
-        if (entry->handle)
-            cache_[pid] = std::move(entry);
-        return app;
+        if (appId.empty())
+            appId = entry->appId;
+        if (!appId.empty())
+            app.id = "aumid:" + utf8(appId);
+        auto result = catalog_.identify(app, {entry->metadata, appId, !appId.empty()});
+        if (fresh && entry->handle && !entry->app.path.empty()) {
+            if (cache_.size() >= 128)
+                cache_.erase(cache_.begin());
+            cache_[pid] = std::move(fresh);
+        }
+        return result;
     }
 };
 AppResolver::AppResolver() : impl_(std::make_unique<Impl>()) {}
 AppResolver::~AppResolver() = default;
-AppInfo AppResolver::resolve(HWND window, DWORD pid) {
+ResolvedApp AppResolver::resolve(HWND window, DWORD pid) {
     return impl_->resolve(window, pid);
+}
+ResolvedApp AppResolver::identify(const AppInfo &app) {
+    return impl_->identify(app);
 }
 } // namespace tt

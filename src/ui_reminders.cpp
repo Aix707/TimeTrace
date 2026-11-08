@@ -89,9 +89,7 @@ void Ui::drawReminders(ui::Canvas &c, float x, float right, float height) {
     for (const auto &view : snapshot_.reminders)
         if (view.rule.kind == ReminderKind::App)
             ++total;
-    int capacity =
-        std::max(1, static_cast<int>((height - size::reminderListTop - size::listFooter) /
-                                     size::reminderRow));
+    int capacity = listCapacity(height);
     scroll_ = std::clamp(scroll_, 0, std::max(0, total - capacity));
     if (total) {
         auto column = ui::reminderValueRect(right, 434);

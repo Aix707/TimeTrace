@@ -98,7 +98,7 @@ void Storage::removeReminder(int64_t rule) {
     s.integer(1, rule);
     s.step();
 }
-void Storage::mergeReminders(const std::string &from, const std::string &to) {
+void Storage::mergeReminders(const std::string &from, const std::string &to, bool automatic) {
     int64_t source{}, target{};
     for (const auto &r : reminderRules()) {
         if (r.app == from)
@@ -108,6 +108,26 @@ void Storage::mergeReminders(const std::string &from, const std::string &to) {
     }
     if (!source && !target)
         return;
+    if (automatic && (!source || !target)) {
+        auto rule = source ? source : target;
+        // Preserve the existing occurrence token and remaining actual-use snooze when
+        // a single configured reminder follows a confidently identified application.
+        Statement adjust(
+            db_, "UPDATE reminder_states SET next=next+COALESCE((SELECT SUM(s.duration) "
+                 "FROM segments s LEFT JOIN app_links m ON m.app=s.app WHERE "
+                 "COALESCE(m.target,s.app)=?1 AND s.day=reminder_states.day),0) "
+                 "WHERE rule=?2 AND next>0");
+        adjust.text(1, source ? to : from);
+        adjust.integer(2, rule);
+        adjust.step();
+        if (source) {
+            Statement move(db_, "UPDATE reminder_rules SET app=?1 WHERE id=?2");
+            move.text(1, to);
+            move.integer(2, source);
+            move.step();
+        }
+        return;
+    }
     auto resultId = target ? target : source;
     struct State {
         Millis next{};

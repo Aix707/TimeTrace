@@ -49,16 +49,16 @@ struct Application {
         tray = {sizeof(tray)};
         tray.hWnd = host;
         tray.uID = 1;
-        tray.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+        tray.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
         tray.uCallbackMessage = tt::WM_TRAY;
         tray.hIcon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1));
-        wcscpy_s(tray.szTip, L"TimeTrace · 屏幕时间");
+        wcscpy_s(tray.szTip, paused ? L"TimeTrace · 已暂停" : L"TimeTrace · 正在统计");
         Shell_NotifyIconW(NIM_ADD, &tray);
         tray.uVersion = NOTIFYICON_VERSION_4;
         Shell_NotifyIconW(NIM_SETVERSION, &tray);
     }
     void updateTray() {
-        tray.uFlags = NIF_TIP;
+        tray.uFlags = NIF_TIP | NIF_SHOWTIP;
         wcscpy_s(tray.szTip, paused ? L"TimeTrace · 已暂停" : L"TimeTrace · 正在统计");
         Shell_NotifyIconW(NIM_MODIFY, &tray);
     }
@@ -169,7 +169,7 @@ LRESULT CALLBACK hostProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case tt::WM_NOTICE: {
         std::unique_ptr<tt::ReminderEvent> event(reinterpret_cast<tt::ReminderEvent *>(l));
         if (!tt::showToast(*event)) {
-            a->tray.uFlags = NIF_INFO;
+            a->tray.uFlags = NIF_INFO | NIF_SHOWTIP;
             auto title = tt::reminderTitle(*event);
             wcsncpy_s(a->tray.szInfoTitle, title.c_str(), _TRUNCATE);
             auto body = tt::reminderBody(*event);
@@ -212,9 +212,10 @@ LRESULT CALLBACK hostProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         a->observe();
         if (a->ui)
             a->ui->close();
+        bool saved = !a->service || a->service->finish();
         a->service.reset();
         Shell_NotifyIconW(NIM_DELETE, &a->tray);
-        PostQuitMessage(0);
+        PostQuitMessage(saved ? 0 : 6);
         return 0;
     }
     return DefWindowProcW(h, m, w, l);
@@ -320,6 +321,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                         view.name = app.name;
             for (auto &row : s.apps)
                 row.icon = tt::loadAppIcon(row.app.path);
+            if (!s.selected.app.id.empty())
+                s.selected.icon = tt::loadAppIcon(s.selected.app.path);
             return ui.renderPng(render, std::move(s), renderPage, selected, renderWidth,
                                 renderHeight)
                        ? 0
@@ -360,7 +363,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             if (other && !(background && !stop && !pause && !resume && !reminders)) {
                 DWORD otherPid{};
                 GetWindowThreadProcessId(other, &otherPid);
-                HANDLE exiting = stop ? OpenProcess(SYNCHRONIZE, FALSE, otherPid) : nullptr;
+                HANDLE exiting = stop ? OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                                                    FALSE, otherPid)
+                                      : nullptr;
+                if (stop && !exiting) {
+                    if (mutex)
+                        CloseHandle(mutex);
+                    return 5;
+                }
                 AllowSetForegroundWindow(otherPid);
                 PostMessageW(other,
                              stop              ? tt::WM_STOP
@@ -373,8 +383,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                              0);
                 if (exiting) {
                     auto result = WaitForSingleObject(exiting, 10000);
+                    DWORD exitCode{};
+                    bool saved = result == WAIT_OBJECT_0 &&
+                                 GetExitCodeProcess(exiting, &exitCode) && exitCode == 0;
                     CloseHandle(exiting);
-                    if (result != WAIT_OBJECT_0) {
+                    if (!saved) {
                         if (mutex)
                             CloseHandle(mutex);
                         return 5;
@@ -383,7 +396,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             }
             if (mutex)
                 CloseHandle(mutex);
-            return other ? 0 : 2;
+            return other ? 0 : existing ? 5 : 2;
         }
         Application state;
         application = &state;
@@ -426,6 +439,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        auto exitCode = static_cast<int>(msg.wParam);
         while (PeekMessageW(&msg, nullptr, tt::WM_SNAPSHOT, tt::WM_NOTICE, PM_REMOVE)) {
             if (msg.message == tt::WM_SNAPSHOT)
                 delete reinterpret_cast<tt::Snapshot *>(msg.lParam);
@@ -434,6 +448,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         }
         application = nullptr;
         CloseHandle(mutex);
+        if (exitCode != 0)
+            return exitCode;
     } catch (const std::exception &e) {
         MessageBoxW(nullptr,
                     (L"TimeTrace 无法启动。\n\n" + tt::wide(e.what()) +

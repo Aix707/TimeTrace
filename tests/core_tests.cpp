@@ -432,7 +432,7 @@ void storageTests(const std::filesystem::path &dir) {
             "Original interval identity preserved");
     db.clear();
     s = db.snapshot(today, false);
-    require(s.total == 0 && s.apps.size() == 1 && db.reminderRules().back().threshold == 2000,
+    require(s.total == 0 && s.apps.empty() && db.reminderRules().back().threshold == 2000,
             "Clear retains reminder configuration");
     require(db.reminderStates(today).empty() && db.getSetting("paused") == "1" &&
                 db.appMappings()["a"] == "b",
@@ -519,9 +519,9 @@ void migrationTests(const std::filesystem::path &dir) {
             rawSql(file, "DROP TABLE app_labels;DROP TABLE app_links;");
         else
             rawSql(file, "INSERT INTO app_labels VALUES('b','custom');INSERT INTO app_links "
-                         "VALUES('c','b');");
+                         "(app,target) VALUES('c','b');");
         Storage db(file);
-        require(scalar(file, "PRAGMA user_version") == 4, "Schema one and two upgrade to four");
+        require(scalar(file, "PRAGMA user_version") == 5, "Schema one and two upgrade to five");
         require(
             scalar(file, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('limits','notices')") ==
                 0,
@@ -545,6 +545,72 @@ void migrationTests(const std::filesystem::path &dir) {
             require(db.appMappings()["c"] == "b" && db.applications()[1].name == L"custom",
                     "Schema two labels and groups preserved");
     }
+    auto grouped = dir / L"legacy-grouped.db";
+    rawSql(grouped,
+           "CREATE TABLE apps(id TEXT PRIMARY KEY,name TEXT NOT NULL,path TEXT NOT NULL);"
+           "CREATE TABLE segments(id INTEGER PRIMARY KEY,app TEXT,start INTEGER,end INTEGER,"
+           "duration INTEGER,day TEXT,hour INTEGER);"
+           "CREATE TABLE app_links(app TEXT PRIMARY KEY,target TEXT NOT NULL);"
+           "CREATE TABLE limits(app TEXT PRIMARY KEY,duration INTEGER NOT NULL);"
+           "CREATE TABLE notices(app TEXT,day TEXT,next INTEGER,muted INTEGER,"
+           "PRIMARY KEY(app,day));"
+           "INSERT INTO apps VALUES('alias','Alias',''),('target','Target',''),"
+           "('other','Other',''),('other-target','Other Target','');"
+           "INSERT INTO app_links VALUES('alias','target'),('other','other-target');"
+           "INSERT INTO segments VALUES(1,'alias',0,20000,20000,'2026-10-17',12),"
+           "(2,'target',20000,60000,40000,'2026-10-17',12),"
+           "(3,'other',60000,90000,30000,'2026-10-17',12),"
+           "(4,'other-target',90000,100000,10000,'2026-10-17',12),"
+           "(5,'alias',100000,110000,10000,'2026-10-19',12),"
+           "(6,'target',110000,140000,30000,'2026-10-19',12);"
+           "INSERT INTO limits VALUES('alias',120000),('target',60000),('other',90000);"
+           "INSERT INTO notices VALUES('alias','2026-10-17',320000,0),"
+           "('target','2026-10-17',200000,0),('other','2026-10-17',330000,0),"
+           "('alias','2026-10-18',0,1),('target','2026-10-18',200000,0),"
+           "('target','2026-10-19',340000,0);"
+           "PRAGMA user_version=2;");
+    {
+        Storage db(grouped);
+        require(
+            scalar(grouped, "SELECT duration FROM reminder_rules WHERE app='target'") == 60000 &&
+                scalar(grouped, "SELECT duration FROM reminder_rules WHERE app='other-target'") ==
+                    90000,
+            "Grouped legacy migration prioritizes target settings and inherits source-only rules");
+        auto states = db.reminderStates("2026-10-17");
+        auto ruleFor = [&](const std::string &app) {
+            auto rules = db.reminderRules();
+            auto found = std::find_if(rules.begin(), rules.end(),
+                                      [&](const auto &rule) { return rule.app == app; });
+            return found == rules.end() ? int64_t{} : found->id;
+        };
+        auto targetRule = ruleFor("target"), otherRule = ruleFor("other-target");
+        auto stateFor = [&](int64_t rule) {
+            auto found = std::find_if(states.begin(), states.end(),
+                                      [&](const auto &state) { return state.rule == rule; });
+            return found == states.end() ? ReminderState{} : *found;
+        };
+        require(stateFor(targetRule).next == 360000 && stateFor(otherRule).next == 340000,
+                "Grouped legacy snoozes retain their remaining actual-use time");
+        auto nextDay = db.reminderStates("2026-10-18");
+        require(nextDay.size() == 1 && nextDay.front().rule == targetRule && nextDay.front().muted,
+                "Alias silence is retained when target and source both have legacy notices");
+        auto targetOnly = db.reminderStates("2026-10-19");
+        require(targetOnly.size() == 1 && targetOnly.front().next == 340000,
+                "Canonical legacy snooze thresholds are not extended by existing aliases");
+        require(scalar(grouped, "SELECT COUNT(*) FROM segments") == 6 &&
+                    scalar(grouped, "SELECT SUM(duration) FROM segments") == 140000,
+                "Grouped legacy state migration preserves every original interval");
+        ReminderEngine engine("legacy-grouped");
+        engine.load(db.reminderRules(), states, db.dailyUsage("2026-10-17"), "2026-10-17", true);
+        engine.add("target", 299999);
+        require(engine.evaluate(true).empty(),
+                "Grouped legacy reminder waits for the preserved snooze remainder");
+        engine.add("target", 1);
+        auto events = engine.evaluate(true);
+        require(events.size() == 1 && events.front().rule.id == targetRule,
+                "Grouped legacy snooze fires at its exact combined-use boundary");
+    }
+    std::filesystem::remove(grouped);
     auto file = dir / L"corrupt.db";
     {
         std::ofstream f(file);
@@ -592,8 +658,8 @@ void optimizationTests(const std::filesystem::path &dir) {
         require(db.applications()[0].name == L"Custom", "Rename invalidates catalog");
         db.app({"b", L"B", {}});
         db.setReminder("b", 60000);
-        require(db.snapshot(day, false).apps.size() == 1,
-                "Zero-use reminder applications stay available");
+        require(db.snapshot(day, false).apps.empty() && db.applications().size() == 2,
+                "Zero-use reminder applications stay in the catalog outside the ranking");
         bool failed = false;
         try {
             db.save({{"a", monday, 1000}, {"missing", monday + 1000, 1000}});
@@ -624,7 +690,7 @@ void optimizationTests(const std::filesystem::path &dir) {
                  "user_version=3;");
     {
         Storage db(file);
-        require(scalar(file, "PRAGMA user_version") == 4 && db.snapshot(day, true).total == 168000,
+        require(scalar(file, "PRAGMA user_version") == 5 && db.snapshot(day, true).total == 168000,
                 "Schema three upgrades without discarding history");
         auto state = db.reminderStates(day).front();
         require(state.token == "keep-token" && state.muted && state.next == 12345,
@@ -648,6 +714,132 @@ void optimizationTests(const std::filesystem::path &dir) {
     std::filesystem::remove(file.wstring() + L"-wal");
     std::filesystem::remove(file.wstring() + L"-shm");
 }
+void identityStorageTests(const std::filesystem::path &dir) {
+    auto file = dir / L"identities.db";
+    const Millis start = 1700000000000;
+    const auto day = localDay(start);
+    const AppInfo group{"app:sample", L"Sample", L"sample.exe"};
+    {
+        Storage db(file);
+        db.app({"sample-helper.exe", L"Sample Helper", L"sample-helper.exe"});
+        require(!db.applications()[0].hasUsage, "Catalog metadata alone does not count as use");
+        db.save({{"sample-helper.exe", start, 400}});
+        require(db.registerApp({"sample-helper.exe", L"Sample Helper", L"sample-helper.exe"},
+                               group) == group.id,
+                "Confident identity registration returns the display application");
+        require(db.applications().size() == 1 && db.applications()[0].hasUsage &&
+                    db.snapshot(day, false).total == 400,
+                "Automatic grouping preserves subsecond use and propagates activity");
+        require(scalar(file, "SELECT COUNT(*) FROM segments WHERE app='sample-helper.exe'") == 1,
+                "Automatic grouping retains original interval identity");
+        auto refreshed = group;
+        refreshed.name = L"Sample Updated";
+        db.registerApp({"sample-helper.exe", L"Sample Helper", L"sample-helper.exe"}, refreshed);
+        require(db.applications()[0].name == L"Sample Updated",
+                "Repeated registration refreshes representative metadata");
+        require(db.identitySources().size() == 2,
+                "Startup identity sources include aliases and representatives");
+        auto history = db.snapshot(shiftDay(day, -1), false, "sample-helper.exe");
+        require(history.apps.empty() && history.selected.app.id == group.id &&
+                    history.selected.used == 0 && history.selectedTotal == 0,
+                "Historical zero-use details retain selected application metadata");
+        db.app({"new-helper", L"New Helper", L"new-helper.exe"});
+        const AppInfo newGroup{"app:new", L"New", L"new.exe"};
+        db.registerApp({"new-helper", L"New Helper", L"new-helper.exe"}, newGroup);
+        require(!db.applications()[0].hasUsage, "Unused representative remains distinguishable");
+        db.save({{"new-helper", start + 400, 1000}});
+        auto fresh = db.applications();
+        require(std::all_of(fresh.begin(), fresh.end(), [](const auto &a) { return a.hasUsage; }),
+                "First committed interval invalidates catalog and marks its representative used");
+
+        db.app({"manual", L"Manual", {}});
+        db.renameApp("manual", L"User Name");
+        require(db.registerApp({"manual", L"Metadata", {}}, group) == "manual",
+                "Automatic grouping respects explicit user names");
+        db.app({"child", L"Child", {}});
+        db.mergeApps("child", "manual");
+        require(db.registerApp({"child", L"Child", {}}, group) == "manual" &&
+                    db.registerApp({"manual", L"Metadata", {}}, group) == "manual",
+                "Automatic grouping respects both members and roots of manual groups");
+
+        db.app({"conflicting", L"Conflicting", {}});
+        db.setReminder("conflicting", 60000);
+        db.setReminder(group.id, 120000);
+        require(db.registerApp({"conflicting", L"Conflicting", {}}, group) == "conflicting",
+                "Automatic grouping retains distinct user reminder configurations");
+        auto rule = db.reminderRules().back().id;
+        db.commit({}, {{rule, day, 300400, false, false, "same-occurrence"}});
+        db.app({"second-helper", L"Second Helper", {}});
+        db.save({{"second-helper", start + 1400, 2000}});
+        db.registerApp({"second-helper", L"Second Helper", {}}, group);
+        auto states = db.reminderStates(day);
+        require(states[0].next == 302400 && states[0].token == "same-occurrence",
+                "Automatic grouping retains the existing token and remaining snooze");
+        db.registerApp({"second-helper", L"Second Helper", {}}, group);
+        require(db.reminderStates(day)[0].next == 302400,
+                "Repeated automatic grouping does not extend snooze again");
+        require(db.registerApp({"sample-helper.exe", L"Sample Helper", L"sample-helper.exe"},
+                               newGroup) == group.id &&
+                    db.appMappings()["sample-helper.exe"] == group.id,
+                "Changed identity evidence cannot split an established automatic group");
+        require(db.reminderStates(day)[0].next == 302400 &&
+                    db.reminderStates(day)[0].token == "same-occurrence" &&
+                    db.dailyUsage(day)[group.id] == 2400,
+                "Skipped regrouping preserves configured reminder state and cumulative use");
+
+        db.registerApp({"unknown:10", L"Unknown 10", {}});
+        db.registerApp({"unknown-frame:20", L"Unknown 20", {}});
+        auto mappings = db.appMappings();
+        require(mappings["unknown:10"] == "app:unidentified" &&
+                    mappings["unknown-frame:20"] == "app:unidentified",
+                "Unidentified process instances share one stable display identity");
+        db.clear();
+        require(std::none_of(db.applications().begin(), db.applications().end(),
+                             [](const auto &a) { return a.hasUsage; }),
+                "Clear resets activity eligibility while preserving applications");
+    }
+    std::filesystem::remove(file);
+
+    file = dir / L"schema4.db";
+    rawSql(file,
+           "CREATE TABLE apps(id TEXT PRIMARY KEY,name TEXT NOT NULL,path TEXT NOT NULL);"
+           "CREATE TABLE segments(id INTEGER PRIMARY KEY,app TEXT,start INTEGER,end INTEGER,"
+           "duration INTEGER,day TEXT,hour INTEGER);"
+           "CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);"
+           "CREATE TABLE app_labels(app TEXT PRIMARY KEY,name TEXT NOT NULL);"
+           "CREATE TABLE app_links(app TEXT PRIMARY KEY,target TEXT NOT NULL);"
+           "CREATE TABLE reminder_rules(id INTEGER PRIMARY KEY AUTOINCREMENT,kind INTEGER,"
+           "app TEXT UNIQUE,duration INTEGER,enabled INTEGER);"
+           "CREATE TABLE reminder_states(rule INTEGER,day TEXT,next INTEGER,notified INTEGER,"
+           "muted INTEGER,token TEXT,PRIMARY KEY(rule,day));"
+           "INSERT INTO apps VALUES('a','A','a.exe'),('b','B','b.exe'),"
+           "('unknown:1','Unknown 1',''),('unknown:2','Unknown 2',''),('empty','Empty','');"
+           "INSERT INTO segments VALUES(1,'a',1000,2000,1000,'2026-10-17',12),"
+           "(2,'unknown:1',2000,2300,300,'2026-10-17',12),"
+           "(3,'unknown:2',2300,2500,200,'2026-10-17',12);"
+           "INSERT INTO app_links VALUES('a','b');INSERT INTO app_labels VALUES('b','Custom');"
+           "INSERT INTO reminder_rules VALUES(1,0,NULL,3600000,0),(2,1,'b',60000,1);"
+           "INSERT INTO reminder_states VALUES(2,'2026-10-17',300000,0,1,'retain-token');"
+           "PRAGMA user_version=4;");
+    {
+        Storage db(file);
+        require(scalar(file, "PRAGMA user_version") == 5 &&
+                    scalar(file, "SELECT COUNT(*) FROM segments") == 3 &&
+                    scalar(file, "SELECT SUM(duration) FROM segments") == 1500,
+                "Schema four upgrade retains every interval and total");
+        require(db.appMappings()["a"] == "b" &&
+                    scalar(file, "SELECT manual FROM app_links WHERE app='a'") == 1,
+                "Schema four existing groups retain explicit ownership");
+        auto snapshot = db.snapshot("2026-10-17", false);
+        require(snapshot.total == 1500 && snapshot.apps.size() == 2 &&
+                    snapshot.apps[0].app.name == L"Custom" && snapshot.apps[0].app.hasUsage,
+                "Migration consolidates unidentified rows and derives catalog activity");
+        require(db.reminderStates("2026-10-17")[0].token == "retain-token" &&
+                    db.reminderStates("2026-10-17")[0].muted,
+                "Schema four migration keeps reminder actions and silence state");
+    }
+    std::filesystem::remove(file);
+}
 } // namespace
 int wmain(int argc, wchar_t **argv) {
     try {
@@ -659,6 +851,10 @@ int wmain(int argc, wchar_t **argv) {
                    (L"TimeTrace-test-" + std::to_wstring(GetCurrentProcessId()));
         std::filesystem::create_directories(dir);
         timelineTests();
+        require(formatDuration(0) == L"0秒", "Zero duration remains zero");
+        require(formatDuration(1) == L"不足1秒" && formatDuration(999) == L"不足1秒",
+                "Positive subsecond duration is never displayed as zero");
+        require(formatDuration(1000) == L"1秒", "Whole seconds keep existing formatting");
         engineTests();
         protocolTests();
         boundaryTests(dir);
@@ -666,6 +862,7 @@ int wmain(int argc, wchar_t **argv) {
         mergeTests(dir);
         migrationTests(dir);
         optimizationTests(dir);
+        identityStorageTests(dir);
         // Files are all fixed names in this process's test directory; never touch a user profile.
         for (auto name : {L"storage.db", L"merge.db", L"v1.db", L"v2.db", L"midnight.db"})
             std::filesystem::remove(dir / name);

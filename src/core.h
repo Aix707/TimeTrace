@@ -47,6 +47,7 @@ Millis utcNow();
 struct AppInfo {
     std::string id;
     std::wstring name, path;
+    bool hasUsage{true};
 };
 struct AppRow {
     AppInfo app;
@@ -60,6 +61,7 @@ struct Snapshot {
     Millis total{}, selectedTotal{};
     std::vector<Millis> buckets;
     std::vector<AppRow> apps;
+    AppRow selected;
     std::vector<AppInfo> catalog;
     std::vector<ReminderView> reminders;
     std::wstring error;

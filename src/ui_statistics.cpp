@@ -109,9 +109,7 @@ void Ui::drawOverview(ui::Canvas &c, float x, float right, float height) {
     for (const auto &row : snapshot_.apps)
         if (row.used > 0)
             ++count;
-    int capacity = std::max(
-        1, static_cast<int>((height - size::overviewBottom - listTop - size::overviewListGap) /
-                            size::row));
+    int capacity = listCapacity(height);
     scroll_ = std::clamp(scroll_, 0, std::max(0, count - capacity));
     if (!count)
         c.text(L"暂无使用记录", {x, listTop + 64, right, listTop + 100}, size::title,
@@ -173,17 +171,23 @@ void Ui::drawDetail(ui::Canvas &c, float x, float right, float height) {
         if (!view->state.token.empty())
             reminderActions(c, right - size::inset, rowTop + size::preferenceRow + size::gap,
                             selected_);
-    } else {
+    } else if (selected_ != "app:unidentified") {
         c.rowText(L"尚未设置", {}, x + size::inset, rowTop, right - 180);
         button(c, ui::controlRect(right - size::inset, rowTop + 22), L"添加提醒", 207, selected_,
                true);
-    }
+    } else
+        c.rowText(L"此项暂无法设置提醒", {}, x + size::inset, rowTop, right - size::inset);
     float barTop = height - size::detailBarBottom - size::control;
     c.line(x, barTop - 16, right, barTop - 16, theme::separator);
-    const AppRow *chosen = nullptr;
-    for (const auto &row : snapshot_.apps)
-        if (row.app.id == selected_)
-            chosen = &row;
+    const AppRow *chosen = snapshot_.selected.app.id == selected_ ? &snapshot_.selected : nullptr;
+    AppRow fallback;
+    if (!chosen)
+        for (const auto &app : snapshot_.catalog)
+            if (app.id == selected_) {
+                fallback.app = app;
+                chosen = &fallback;
+                break;
+            }
     linkButton(c, ui::controlRect(x + size::compactWidth, barTop, size::compactWidth), L"返回",
                100);
     applicationIcon(c, chosen, {x + 96, barTop + 2, x + 128, barTop + 34});
@@ -191,7 +195,10 @@ void Ui::drawDetail(ui::Canvas &c, float x, float right, float height) {
            {x + 144, barTop, right - 276, barTop + size::control}, size::title, theme::text, 600);
     button(c, ui::controlRect(right - size::actionWidth - size::gap, barTop), L"重命名", 212,
            selected_);
-    if (snapshot_.catalog.size() > 1)
-        button(c, ui::controlRect(right, barTop), L"合并应用", 213, selected_);
+    if (selected_ != "app:unidentified" &&
+        std::any_of(snapshot_.catalog.begin(), snapshot_.catalog.end(), [&](const auto &app) {
+            return app.id != selected_ && app.id != "app:unidentified" && app.hasUsage;
+        }))
+        button(c, ui::controlRect(right, barTop), L"合并记录", 213, selected_);
 }
 } // namespace tt

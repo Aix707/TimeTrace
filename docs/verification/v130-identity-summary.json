@@ -1,0 +1,15 @@
+{
+  "sources": 104,
+  "identified": 37,
+  "intervals": 5419,
+  "canonical_apps": 89,
+  "segments_sha256_before": "210bbcbc2345aed82c4489d20e1395f72b77fbd0f2302d24acc576277ef8dc5f",
+  "segments_sha256_after": "210bbcbc2345aed82c4489d20e1395f72b77fbd0f2302d24acc576277ef8dc5f",
+  "raw_intervals_unchanged": true,
+  "totals_equal": true,
+  "labels_preserved": true,
+  "rules_preserved": true,
+  "repeat_stable": true,
+  "integrity_ok": true,
+  "passed": true
+}

@@ -90,9 +90,66 @@ void Ui::update(Snapshot s) {
         return;
     }
     snapshot_ = std::move(s);
+    if (page_ == 3 && !snapshot_.selected.app.id.empty())
+        selected_ = snapshot_.selected.app.id;
     std::erase_if(paintCache_.icons, [](const auto &item) { return item.first.use_count() == 1; });
+    refreshVisibleIcons();
     if (visible())
         InvalidateRect(window_, nullptr, FALSE);
+}
+int Ui::listCapacity(float height) const {
+    if (page_ == 3)
+        return 1;
+    if (page_ == 2)
+        return 0;
+    auto capacity = page_ == 1
+                        ? (height - size::reminderListTop - size::listFooter) / size::reminderRow
+                        : (height - size::overviewBottom - height * .60f -
+                           size::overviewListGap) /
+                              size::row;
+    return std::clamp(static_cast<int>(capacity), 1, 64);
+}
+std::vector<std::string> Ui::visibleIconApps() const {
+    std::vector<std::string> apps;
+    if (!window_)
+        return apps;
+    if (page_ == 3) {
+        if (!selected_.empty())
+            apps.push_back(selected_);
+        return apps;
+    }
+    if (page_ == 2 ||
+        (page_ == 0 && (snapshot_.day != day_ || snapshot_.weekly != weekly_)))
+        return apps;
+    RECT client{};
+    GetClientRect(window_, &client);
+    auto capacity = listCapacity(client.bottom * 96.0f / GetDpiForWindow(window_));
+    if (page_ == 1) {
+        for (const auto &view : snapshot_.reminders)
+            if (view.rule.kind == ReminderKind::App)
+                apps.push_back(view.rule.app);
+    } else {
+        for (const auto &row : snapshot_.apps)
+            if (row.used > 0)
+                apps.push_back(row.app.id);
+    }
+    auto offset = std::clamp(scroll_, 0, std::max(0, static_cast<int>(apps.size()) - capacity));
+    apps.erase(apps.begin(), apps.begin() + offset);
+    if (apps.size() > static_cast<size_t>(capacity))
+        apps.resize(capacity);
+    std::sort(apps.begin(), apps.end());
+    apps.erase(std::unique(apps.begin(), apps.end()), apps.end());
+    return apps;
+}
+void Ui::refreshVisibleIcons() {
+    if (!window_)
+        return;
+    RECT client{};
+    GetClientRect(window_, &client);
+    auto capacity = static_cast<size_t>(
+        listCapacity(client.bottom * 96.0f / GetDpiForWindow(window_)));
+    if (capacity != requestedIconCount_ || visibleIconApps() != requestedIconApps_)
+        request();
 }
 void Ui::request() {
     if (!service_ || !window_)
@@ -106,6 +163,13 @@ void Ui::request() {
     c.weekly = weekly_;
     if (page_ == 3)
         c.app = selected_;
+    RECT client{};
+    GetClientRect(window_, &client);
+    c.iconCount = static_cast<size_t>(
+        listCapacity(client.bottom * 96.0f / GetDpiForWindow(window_)));
+    c.iconApps = visibleIconApps();
+    requestedIconApps_ = c.iconApps;
+    requestedIconCount_ = c.iconCount;
     service_->send(std::move(c));
 }
 void Ui::paint() {
@@ -289,7 +353,7 @@ void Ui::promptReminder(const std::string &app, bool device, bool chooseApp) {
                 p.appName = candidate.name;
     if (chooseApp) {
         for (const auto &candidate : snapshot_.catalog)
-            if (!reminder(candidate.id))
+            if (candidate.id != "app:unidentified" && !reminder(candidate.id))
                 p.choices.push_back(candidate);
         if (p.choices.empty()) {
             MessageBoxW(window_, L"所有应用均已添加提醒，可直接修改时长。", L"应用提醒",
@@ -310,12 +374,15 @@ void Ui::promptReminder(const std::string &app, bool device, bool chooseApp) {
 void Ui::promptApp(const std::string &app, bool merge) {
     Prompt p;
     p.kind = merge ? Prompt::Merge : Prompt::Rename;
-    for (const auto &row : snapshot_.apps)
-        if (row.app.id == app)
-            p.appName = row.app.name;
+    if (snapshot_.selected.app.id == app)
+        p.appName = snapshot_.selected.app.name;
+    else
+        for (const auto &candidate : snapshot_.catalog)
+            if (candidate.id == app)
+                p.appName = candidate.name;
     if (merge) {
         for (const auto &candidate : snapshot_.catalog)
-            if (candidate.id != app)
+            if (candidate.id != app && candidate.id != "app:unidentified" && candidate.hasUsage)
                 p.choices.push_back(candidate);
         if (p.choices.empty())
             return;
@@ -324,12 +391,10 @@ void Ui::promptApp(const std::string &app, bool merge) {
         return;
     Command command;
     command.kind = merge ? Command::Merge : Command::Rename;
-    command.app = app;
+    command.app = merge ? p.target : app;
     command.name = p.text;
-    command.target = p.target;
+    command.target = merge ? app : std::string{};
     service_->send(std::move(command));
-    if (merge)
-        selected_ = p.target;
     request();
 }
 void Ui::act(const Hit &h) {
@@ -515,6 +580,7 @@ LRESULT CALLBACK Ui::proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (self->target_) {
             self->target_->Resize(D2D1::SizeU(LOWORD(l), HIWORD(l)));
         }
+        self->refreshVisibleIcons();
         InvalidateRect(h, nullptr, FALSE);
         return 0;
     case WM_DPICHANGED: {
@@ -591,16 +657,12 @@ LRESULT CALLBACK Ui::proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         RECT client{};
         GetClientRect(h, &client);
         int height = MulDiv(client.bottom, 96, GetDpiForWindow(h));
-        int visible =
-            std::max(1, self->page_ == 1
-                            ? static_cast<int>((height - ui::metrics::reminderListTop -
-                                                ui::metrics::listFooter) /
-                                               ui::metrics::reminderRow)
-                            : static_cast<int>((height - ui::metrics::overviewBottom -
-                                                (height * .60f + ui::metrics::overviewListGap)) /
-                                               ui::metrics::row));
+        int visible = self->listCapacity(static_cast<float>(height));
+        int previous = self->scroll_;
         self->scroll_ = std::clamp(self->scroll_ - (GET_WHEEL_DELTA_WPARAM(w) > 0 ? 1 : -1), 0,
                                    std::max(0, count - visible));
+        if (previous != self->scroll_)
+            self->refreshVisibleIcons();
         self->hover_ = self->focus_ = -1;
         InvalidateRect(h, nullptr, FALSE);
         return 0;
@@ -651,6 +713,8 @@ LRESULT CALLBACK Ui::proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         self->window_ = nullptr;
         self->paintCache_ = {};
         self->snapshot_ = {};
+        self->requestedIconApps_.clear();
+        self->requestedIconCount_ = 0;
         ++self->request_;
         if (self->service_)
             self->service_->send({Command::ReleaseView});
@@ -668,6 +732,8 @@ bool Ui::renderPng(const std::filesystem::path &path, Snapshot snapshot, int pag
     page_ = page;
     selected_ = std::move(selected);
     snapshot_ = std::move(snapshot);
+    if (page_ == 3 && !snapshot_.selected.app.id.empty())
+        selected_ = snapshot_.selected.app.id;
     day_ = snapshot_.day;
     weekly_ = snapshot_.weekly;
     factories();

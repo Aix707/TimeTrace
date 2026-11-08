@@ -11,13 +11,16 @@ def mb(n):return f'{n/1_000_000:.3f} MB'
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 exe=dist/'TimeTrace.exe';setup=dist/f'TimeTrace-{version}-Setup.exe';binary=sha(exe)
 lines=[f'# TimeTrace {version} 测试报告','',f'生成时间：{datetime.now().astimezone().isoformat(timespec="seconds")}','',
-'本版优化后台提醒判断、批量写入、查询队列与视图资源释放，升级至 schema 4 并移除废弃兼容表。保留现有界面、计时口径和基础功能，未增加运行框架、后台线程或定时器。开发检查使用独立目录，未覆盖已安装程序；真实数据仅以只读方式创建副本验证升级。','',
+'本版统一应用身份解析，使用 Windows 应用标识、快捷方式和安装登记等证据自动归组，保留手动名称与分组。升级至 schema 5，修正短时长展示、合并方向、历史详情和托盘提示，并覆盖首次登记及跨午夜保存失败后的恢复。保持原生界面、一个工作线程和原有心跳。开发检查使用隔离目录，实际记录以副本验证。','',
 '## 功能与原生界面','']
-for suffix,label in [('core-tests.log','核心／存储／协议'),('integration-tests.log','隔离安装注册'),('service-tests.log','采集与查询队列')]:
+for suffix,label in [('core-tests.log','核心／存储／协议'),('integration-tests.log','隔离安装注册'),('service-tests.log','采集与查询队列'),('identity-tests.log','通用身份识别')]:
  p=proof/(tag+'-'+suffix)
  if p.exists():lines.append(f'- {label}：{p.read_text(encoding="utf-8-sig").strip()}。')
 a=read('actions.json')
 if a:lines.append(f'- 通知动作：{a["checks"]} 项，'+('通过。' if a['passed'] else '未通过。')+'覆盖已有实例、未运行状态、延后、静默、重复／过期动作及旧入口。实际 Windows 横幅实点仍需隔离安装环境验证。')
+lines.append('- 保存故障回归涵盖首次应用登记写锁、跨午夜提交写锁、通知事务失败与恢复，以及归组后的提醒用时重载。临时失败后的待处理活动保留在内存队列，成功后再确认消费。')
+stop=read('stop-failure.json')
+if stop:lines.append(f'- 正常退出入口的写锁故障检查通过 {stop["failed_final_flush_reported"]}。最终保存持续失败时，程序与停止命令返回失败，安装器据此终止覆盖。')
 d=read('detail-layout.json')
 if d:lines.append(f'- 顶部稳定性：{len(d["cases"])} 种默认／最小窗口、日／周组合，使用同一应用数据对比概览与详情统计区，逐像素差异均为 0：{d["passed"]}。')
 l=read('lifecycle-final.json')
@@ -28,8 +31,12 @@ if l:
  f'- 原生提醒编辑框正文为 16 DIP，输入框与按钮为 36 DIP：{l.get("native_prompt_metrics",False)}；从详情页打开编辑并保存后读回数据库核对。',
  f'- 先执行 {l["warmup_cycles"]} 次含弹窗、确认框、最大化等操作的预热，再执行 {l.get("measured_cycles",l["cycles"]-l["warmup_cycles"])} 次窗口开关。测试器使用异步按钮消息并等待模态窗口退出，避免测试动作嵌套改变执行顺序。',
  f'- 预热开关后 GDI 句柄 {l["baseline_gdi_handles"]} → {l["final_gdi_handles"]}，USER 句柄 {l["baseline_user_handles"]} → {l["final_user_handles"]}；关闭后的私有工作集 {mb(l["private_working_set_after_cycles"])}。自启动真实设置未切换。'])
+ lines.append(f'- 空历史日期仍能读取当前应用名称 {l.get("native_historical_identity",False)}，合并后保留当前应用身份 {l.get("native_merge_kept_current_identity",False)}。')
 lines+=['- 界面沿用 16／22／44 DIP 三档字号、统一尺寸和底部详情栏。原生窗口回归覆盖默认／最小窗口及常用编辑操作。既有设计规范见 `DESIGN.md`。','']
-migration=proof/(tag+'-migration-copy/result.json')
+identity=read('identity-summary.json')
+if identity:
+ lines.extend(['## 实际记录副本','',f'- 原始应用来源 {identity["sources"]} 项，原始区间 {identity["intervals"]} 条。通用证据提供归属候选 {identity["identified"]} 项，实际目录整理后 {identity["canonical_apps"]} 项。候选数量包含原本已经独立识别的软件。',f'- 整理前后原始时段逐项与累计总量一致，数据库完整性和外键检查通过，重复整理结果稳定。核对通过 {identity["passed"]}。','- 路径为空的旧未知区间统一展示为“未识别应用”；缺少可靠关联信息的插件、游戏内核等保留独立记录，可手动并入当前应用。',''])
+migration=proof/(tag+'-migration-final-copy/result.json')
 if migration.exists():
  m=json.loads(migration.read_text(encoding='utf-8-sig'))
  lines.extend([f'- 真实数据副本升级：schema {m["source_schema"]} → {m["target_schema"]}，{m["applications"]} 个应用、{m["intervals"]} 条原始记录；原始记录、总量、名称分组、设置及提醒规则／状态逐项一致：{m["passed"]}。原文件以只读方式打开。'])
@@ -50,7 +57,9 @@ if fg:
  for a in f['applications']:lines.append(f'  - {a["application"]}：{a["recorded_intervals"]} 段，累计误差 {a["error_ms"]} 毫秒。')
 lines+=['','## 资源与体积','',f'- 应用程序：{exe.stat().st_size:,} 字节（{mb(exe.stat().st_size)}）。']
 if setup.exists():lines.append(f'- 离线安装包：{setup.stat().st_size:,} 字节（{mb(setup.stat().st_size)}）；'+('满足 ≤10 MB。' if setup.stat().st_size<=10_000_000 else '超过目标。'))
-p=read('background.json');status=read('background-status.json')
+upgrade=read('upgrade-verification.json')
+if upgrade:lines.append(f'- 本机已有安装升级到 {version}，安装文件合计 {mb(upgrade["installed_bytes"])}。升级前已备份，{upgrade["original_intervals"]} 条原始区间逐项一致，自定义名称和手动分组保留，数据库完整性检查通过 {upgrade["passed"]}。已检查真实窗口打开和关闭后继续托盘运行。')
+p=read('final-background.json');status=read('final-background-status.json')
 if p and status and p.get('pid')==status.get('ApplicationPID') and status.get('SHA256','').lower()==binary:
  cpu=f'{p["average_cpu_percent"]:.4f}%' if p['average_cpu_percent']>=0.01 else '<0.01%（低于显示精度）'
  lines.extend([f'- 托盘短测：预热 {p["warmup_seconds"]} 秒，测量 {p["measured_seconds"]:.1f} 秒，采集 {p["samples"]} 个样本；测量期间界面打开：{p["ui_opened_during_measurement"]}，提前退出：{p["process_exited_early"]}。',
@@ -65,7 +74,7 @@ lines+=['- 编译使用静态 C++ 运行库与 SQLite，界面只使用 Windows 
 '- 指定第三方应用与管理员窗口的 30 分钟误差 ≤2 秒；受控窗口和确定性测试不覆盖所有软件。',
 '- 干净 Windows 11 断网安装、升级、卸载、安装后全部文件体积，以及 Windows 通知实点和真实登录自启动。',
 '- 多显示器不同 DPI 来回拖动，以及 Windows Snap 悬停菜单的完整人工体验；当前已验证原生窗口的命中区域、工作区和最大化功能。','',
-'当前安装和真实数据未改动。三项核心指标的全部正式验收尚未完成；已完成项和待完成项在此分别列明。','',
+'三项核心指标的全部正式验收尚未完成。已完成检查及待完成场景分别列明。','',
 '## 文件指纹','',f'- `TimeTrace.exe` SHA-256：`{binary}`']
 if setup.exists():lines.append(f'- `{setup.name}` SHA-256：`{sha(setup)}`')
 (root/'docs/TEST-REPORT.md').write_text('\n'.join(lines)+'\n',encoding='utf-8')

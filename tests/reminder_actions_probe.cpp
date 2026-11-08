@@ -60,13 +60,35 @@ struct Process {
         GetExitCodeProcess(p.hProcess, &code);
         return code;
     }
-    HWND host() {
-        for (int i = 0; i < 100; ++i) {
-            if (auto h = find(p.dwProcessId, L"TimeTrace.Host"))
-                return h;
-            Sleep(50);
+    template <class Predicate> bool waitUntil(Predicate predicate) const {
+        auto deadline = GetTickCount64() + 10000;
+        do {
+            if (WaitForSingleObject(p.hProcess, 0) != WAIT_TIMEOUT)
+                throw std::runtime_error("application exited before expected state");
+            if (predicate())
+                return true;
+            Sleep(25);
+        } while (GetTickCount64() < deadline);
+        return false;
+    }
+    HWND window(const wchar_t *cls) const {
+        HWND result{};
+        if (!waitUntil([&] {
+                result = find(p.dwProcessId, cls);
+                return result != nullptr;
+            }))
+            throw std::runtime_error("application window deadline exceeded");
+        return result;
+    }
+    HWND host() const {
+        return window(L"TimeTrace.Host");
+    }
+    DWORD stop() {
+        if (auto h = find(p.dwProcessId, L"TimeTrace.Host")) {
+            if (!PostMessageW(h, tt::WM_STOP, 0, 0))
+                throw std::runtime_error("stop message failed");
         }
-        throw std::runtime_error("no host");
+        return exit();
     }
 };
 } // namespace
@@ -74,6 +96,7 @@ int wmain(int argc, wchar_t **argv) {
     if (argc != 3)
         return 2;
     std::ofstream out(argv[2]);
+    ULONGLONG startupWait{};
     try {
         auto root = std::filesystem::temp_directory_path() /
                     (L"TimeTrace-actions-" + std::to_wstring(GetCurrentProcessId()));
@@ -104,16 +127,18 @@ int wmain(int argc, wchar_t **argv) {
             Process app(argv[1], args + tt::reminderActionUri({tt::ReminderAction::Snooze, appRule,
                                                                "startup-token"}));
             auto host = app.host();
-            Sleep(350);
+            auto actionStarted = GetTickCount64();
+            bool snoozed = app.waitUntil([&] {
+                auto saved = state();
+                return saved.next == 360000 && saved.token.empty();
+            });
+            startupWait = GetTickCount64() - actionStarted;
             require(!find(app.p.dwProcessId, L"TimeTrace.Window"),
                     "Action starts stopped app in tray");
-            require(state().next == 360000 && state().token.empty(),
-                    "Stopped app accepts persisted snooze occurrence");
+            require(snoozed, "Stopped app accepts persisted snooze occurrence");
             Process duplicate(argv[1], args + tt::reminderActionUri({tt::ReminderAction::MuteToday,
                                                                      appRule, "startup-token"}));
             require(duplicate.exit() == 0, "Existing instance sender acknowledged");
-            Sleep(100);
-            require(!state().muted && state().next == 360000, "Replay ignored across instances");
             require(!find(app.p.dwProcessId, L"TimeTrace.Window"),
                     "Action forwarding does not open UI");
             tt::ReminderActionWire wire{};
@@ -126,24 +151,22 @@ int wmain(int argc, wchar_t **argv) {
                     "Truncated IPC rejected");
             Process body(argv[1], args + L"timetrace://reminders");
             require(body.exit() == 0, "Body URI delivered");
-            Sleep(200);
-            auto ui = find(app.p.dwProcessId, L"TimeTrace.Window");
+            auto ui = app.window(L"TimeTrace.Window");
             require(ui != nullptr, "Body click opens window");
             SendMessageW(ui, WM_CLOSE, 0, 0);
             Process old(argv[1], args + L"--limits");
             require(old.exit() == 0, "Legacy command accepted");
-            Sleep(100);
-            ui = find(app.p.dwProcessId, L"TimeTrace.Window");
+            ui = app.window(L"TimeTrace.Window");
             require(ui != nullptr, "Legacy command opens reminder page");
             SendMessageW(ui, WM_CLOSE, 0, 0);
             Process legacyUri(argv[1], args + L"timetrace://limits");
             require(legacyUri.exit() == 0, "Legacy URI accepted");
-            Sleep(100);
-            ui = find(app.p.dwProcessId, L"TimeTrace.Window");
+            ui = app.window(L"TimeTrace.Window");
             require(ui != nullptr, "Legacy URI opens window");
             SendMessageW(ui, WM_CLOSE, 0, 0);
-            PostMessageW(host, tt::WM_STOP, 0, 0);
-            require(app.exit() == 0, "Clean isolated stop");
+            require(app.stop() == 0, "Clean isolated stop");
+            auto saved = state();
+            require(!saved.muted && saved.next == 360000, "Replay ignored across instances");
         }
         {
             tt::Storage db(path);
@@ -153,18 +176,23 @@ int wmain(int argc, wchar_t **argv) {
             Process app(argv[1], args + tt::reminderActionUri({tt::ReminderAction::MuteToday,
                                                                appRule, "mute-token"}));
             app.host();
-            Sleep(200);
-            require(state().muted && state().token.empty(), "Stopped app direct mute persists");
+            require(app.waitUntil([&] {
+                auto saved = state();
+                return saved.muted && saved.token.empty();
+            }),
+                    "Stopped app direct mute persists");
+            require(app.stop() == 0, "Direct mute finishes cleanly");
         }
         {
             Process app(argv[1], args + L"--background");
             app.host();
-            Sleep(200);
-            require(state().muted, "Today's silence survives normal restart");
             Process expired(argv[1], args + tt::reminderActionUri({tt::ReminderAction::Snooze,
                                                                    appRule, "expired-token"}));
             require(expired.exit() == 0, "Stale sender exits normally");
-            Sleep(100);
+            // Stop is queued after the action. Its completed flush is a processing barrier
+            // for actions that deliberately leave no new state to poll.
+            require(app.stop() == 0, "Restarted app drains queued actions cleanly");
+            require(state().muted, "Today's silence survives normal restart");
             require(state().muted, "Expired occurrence ignored");
         }
         {
@@ -175,9 +203,9 @@ int wmain(int argc, wchar_t **argv) {
             Process app(argv[1], args + tt::reminderActionUri(
                                             {tt::ReminderAction::Snooze, appRule, "mute-token"}));
             app.host();
-            Sleep(100);
-            require(state().rule == 0 && !find(app.p.dwProcessId, L"TimeTrace.Window"),
-                    "Deleted rule ignored without UI");
+            require(!find(app.p.dwProcessId, L"TimeTrace.Window"),
+                    "Deleted rule starts without UI");
+            require(app.stop() == 0 && state().rule == 0, "Deleted rule ignored without UI");
         }
         auto invalid = root / L"invalid";
         {
@@ -188,11 +216,12 @@ int wmain(int argc, wchar_t **argv) {
         }
         std::filesystem::remove(path);
         std::filesystem::remove(root);
-        out << "{\"checks\":" << checks
+        out << "{\"startup_snooze_wait_ms\":" << startupWait << ",\"checks\":" << checks
             << ",\"passed\":true,\"actual_shell_toast_click_tested\":false}\n";
         std::cout << "PASS: " << checks << " notification action checks\n";
         return 0;
     } catch (const std::exception &e) {
+        out.seekp(0);
         out << "{\"checks\":" << checks << ",\"passed\":false}\n";
         std::cerr << e.what() << "\n";
         return 1;

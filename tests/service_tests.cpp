@@ -1,26 +1,30 @@
 #include "platform.h"
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
 
 using namespace tt;
 namespace {
 int checks{};
+std::vector<ReminderEvent> notices;
 void require(bool condition, const char *message) {
     ++checks;
     if (!condition)
         throw std::runtime_error(message);
 }
-Snapshot waitSnapshot(HWND host, uint64_t request) {
+Snapshot waitSnapshot(HWND host, uint64_t request, bool allowError = false) {
     auto deadline = GetTickCount64() + 15000;
     while (GetTickCount64() < deadline) {
         MSG message{};
         while (PeekMessageW(&message, host, WM_SNAPSHOT, WM_NOTICE, PM_REMOVE)) {
             if (message.message == WM_NOTICE) {
-                delete reinterpret_cast<ReminderEvent *>(message.lParam);
+                std::unique_ptr<ReminderEvent> event(
+                    reinterpret_cast<ReminderEvent *>(message.lParam));
+                notices.push_back(std::move(*event));
                 continue;
             }
             std::unique_ptr<Snapshot> snapshot(reinterpret_cast<Snapshot *>(message.lParam));
-            if (!snapshot->error.empty())
+            if (!snapshot->error.empty() && !allowError)
                 throw std::runtime_error(utf8(snapshot->error));
             if (snapshot->request == request)
                 return std::move(*snapshot);
@@ -28,6 +32,34 @@ Snapshot waitSnapshot(HWND host, uint64_t request) {
         MsgWaitForMultipleObjects(0, nullptr, FALSE, 20, QS_POSTMESSAGE);
     }
     throw std::runtime_error("Service did not return the latest query");
+}
+struct WriteLock {
+    sqlite3 *db{};
+    explicit WriteLock(const std::filesystem::path &file) {
+        if (sqlite3_open(utf8(file.wstring()).c_str(), &db) != SQLITE_OK)
+            throw std::runtime_error("Open isolated lock connection");
+        exec("BEGIN IMMEDIATE");
+    }
+    ~WriteLock() {
+        sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr);
+        sqlite3_close(db);
+    }
+    void exec(const char *sql) {
+        if (sqlite3_exec(db, sql, nullptr, nullptr, nullptr) != SQLITE_OK)
+            throw std::runtime_error(sqlite3_errmsg(db));
+    }
+};
+void observe(Service &service, HWND host, Millis tick, Millis utc) {
+    Command command;
+    command.sample = {tick, utc, tick, host, GetCurrentProcessId()};
+    service.send(command);
+}
+Snapshot query(Service &service, HWND host, const std::string &day, uint64_t request) {
+    Command command{Command::Query};
+    command.day = day;
+    command.request = request;
+    service.send(command);
+    return waitSnapshot(host, request);
 }
 } // namespace
 int wmain() {
@@ -90,9 +122,112 @@ int wmain() {
             require(db.getSetting("paused") == "1" && db.snapshot(day, false).total == 0,
                     "Service shutdown flushes state in the isolated profile");
         }
+        {
+            Service service(dir / L"registration", host);
+            query(service, host, day, 20001);
+            WriteLock lock(dir / L"registration" / L"data.db");
+            observe(service, host, tick, utc);
+            auto failure = waitSnapshot(host, 0, true);
+            require(failure.error.find(L"locked") != std::wstring::npos,
+                    "First application registration encounters injected write lock");
+            lock.exec("ROLLBACK");
+            observe(service, host, tick + 1000, utc + 1000);
+            observe(service, host, tick + 2000, utc + 2000);
+            auto recovered = query(service, host, day, 20002);
+            require(recovered.total == 2000 && recovered.apps.size() == 1,
+                    "Failed registration retries without losing captured activity or foreign keys");
+            require(query(service, host, day, 20003).total == 2000,
+                    "Repeated query after recovery does not double count");
+        }
+        {
+            Millis lo = utc, hi = utc + 86400000;
+            while (hi - lo > 1) {
+                auto mid = lo + (hi - lo) / 2;
+                if (localDay(mid) == day)
+                    lo = mid;
+                else
+                    hi = mid;
+            }
+            Service service(dir / L"midnight", host);
+            query(service, host, day, 30001);
+            observe(service, host, tick, hi - 500);
+            query(service, host, day, 30002);
+            WriteLock lock(dir / L"midnight" / L"data.db");
+            observe(service, host, tick + 1000, hi + 500);
+            auto failure = waitSnapshot(host, 0, true);
+            require(failure.error.find(L"locked") != std::wstring::npos,
+                    "Midnight transition encounters injected write lock");
+            lock.exec("ROLLBACK");
+            observe(service, host, tick + 2000, hi + 1500);
+            require(query(service, host, day, 30003).total == 500,
+                    "Retry preserves exactly the 500ms before midnight");
+            require(query(service, host, localDay(hi), 30004).total == 1500,
+                    "Retry preserves exactly the 1500ms after midnight");
+        }
+        {
+            auto folder = dir / L"reminder";
+            {
+                Storage db(folder / L"data.db");
+                db.setReminder({}, 1000);
+            }
+            Service service(folder, host);
+            query(service, host, day, 40001);
+            observe(service, host, tick, utc);
+            query(service, host, day, 40002);
+            auto noticeCount = notices.size();
+            WriteLock lock(folder / L"data.db");
+            observe(service, host, tick + 1000, utc + 1000);
+            auto failure = waitSnapshot(host, 0, true);
+            require(failure.error.find(L"locked") != std::wstring::npos &&
+                        notices.size() == noticeCount,
+                    "Failed atomic reminder commit emits no notification");
+            lock.exec("ROLLBACK");
+            auto recovered = query(service, host, day, 40003);
+            require(recovered.total == 1000 && notices.size() == noticeCount + 1,
+                    "Recovered reminder emits once with captured time preserved");
+            require(recovered.reminders.front().state.notified &&
+                        recovered.reminders.front().state.token == notices.back().token,
+                    "Published occurrence matches committed reminder state");
+            query(service, host, day, 40004);
+            require(notices.size() == noticeCount + 1,
+                    "Snapshot queries cannot duplicate recovered notification");
+            require(service.finish(), "Explicit finish confirms successful final save");
+        }
+        {
+            auto folder = dir / L"mapping";
+            {
+                Storage db(folder / L"data.db");
+                db.app({"fixture-source", L"Source", {}});
+                db.app({"fixture-target", L"Target", {}});
+                db.save({{"fixture-source", utc - 90000, 30000},
+                         {"fixture-target", utc - 60000, 35000}});
+                db.setReminder("fixture-source", 60000);
+            }
+            Service service(folder, host);
+            query(service, host, day, 50001);
+            Command merge{Command::Merge};
+            merge.app = "fixture-source";
+            merge.target = "fixture-target";
+            service.send(merge);
+            auto merged = query(service, host, day, 50002);
+            auto rule =
+                std::find_if(merged.reminders.begin(), merged.reminders.end(),
+                             [](const auto &view) { return view.rule.kind == ReminderKind::App; });
+            require(rule != merged.reminders.end() && rule->rule.app == "fixture-target" &&
+                        rule->used == 65000,
+                    "Mapping reload transfers reminder to combined canonical usage");
+            auto noticeCount = notices.size();
+            Command desktop;
+            desktop.sample = {tick, utc, tick, nullptr, 0};
+            service.send(desktop);
+            query(service, host, day, 50003);
+            require(notices.size() == noticeCount + 1 &&
+                        notices.back().rule.app == "fixture-target",
+                    "Regrouped reminder evaluates against current application mapping");
+        }
         std::cout << "PASS: " << checks << " service checks\n";
     } catch (const std::exception &e) {
-        std::cerr << "FAIL: " << e.what() << '\n';
+        std::cerr << "FAIL after " << checks << " checks: " << e.what() << '\n';
         result = 1;
     }
     MSG message{};
@@ -103,8 +238,13 @@ int wmain() {
             delete reinterpret_cast<ReminderEvent *>(message.lParam);
     }
     DestroyWindow(host);
-    for (auto name : {L"data.db", L"data.db-wal", L"data.db-shm"})
-        std::filesystem::remove(dir / name);
+    for (auto child : {L"", L"registration", L"midnight", L"reminder", L"mapping"}) {
+        auto folder = dir / child;
+        for (auto name : {L"data.db", L"data.db-wal", L"data.db-shm"})
+            std::filesystem::remove(folder / name);
+        if (*child)
+            std::filesystem::remove(folder);
+    }
     std::filesystem::remove(dir);
     return result;
 }

@@ -119,6 +119,8 @@ std::string weekStart(const std::string &day) {
 }
 std::wstring formatDuration(Millis ms) {
     ms = std::max<Millis>(0, ms);
+    if (ms > 0 && ms < 1000)
+        return L"不足1秒";
     auto seconds = ms / 1000, minutes = seconds / 60, hours = minutes / 60;
     if (hours)
         return std::to_wstring(hours) + L"小时" +

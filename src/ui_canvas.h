@@ -131,8 +131,9 @@ struct Canvas {
         value = std::max<Millis>(0, value);
         auto minutes = value / 60000, hours = minutes / 60;
         std::wstring text =
-            hours ? std::to_wstring(hours) + L" 小时" +
-                        (minutes % 60 ? L" " + std::to_wstring(minutes % 60) + L" 分钟" : L"")
+            value > 0 && value < 1000 ? formatDuration(value)
+            : hours ? std::to_wstring(hours) + L" 小时" +
+                          (minutes % 60 ? L" " + std::to_wstring(minutes % 60) + L" 分钟" : L"")
             : minutes ? std::to_wstring(minutes) + L" 分钟"
                       : std::to_wstring(value / 1000) + L" 秒";
         ComPtr<IDWriteTextLayout> layout;

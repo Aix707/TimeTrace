@@ -13,10 +13,12 @@ class Storage {
     Storage(const Storage &) = delete;
     Storage &operator=(const Storage &) = delete;
     void app(const AppInfo &info);
+    std::string registerApp(const AppInfo &source, const AppInfo &representative = {});
     void save(const std::vector<Usage> &entries);
     void commit(const std::vector<Usage> &entries, const std::vector<ReminderState> &states);
     Snapshot snapshot(const std::string &day, bool weekly, const std::string &selected = {});
     const std::vector<AppInfo> &applications();
+    std::vector<AppInfo> identitySources();
     void renameApp(const std::string &app, const std::wstring &name);
     void mergeApps(const std::string &source, const std::string &target);
     bool setReminder(const std::string &app, Millis duration, bool enabled = true);
@@ -36,6 +38,7 @@ class Storage {
     Millis usedOnDay(const std::string &app, const std::string &day);
     void writeUsage(const std::vector<Usage> &entries);
     void writeStates(const std::vector<ReminderState> &states);
-    void mergeReminders(const std::string &from, const std::string &to);
+    void mergeReminders(const std::string &from, const std::string &to, bool automatic = false);
+    bool autoLink(const std::string &source, const AppInfo &representative);
 };
 } // namespace tt

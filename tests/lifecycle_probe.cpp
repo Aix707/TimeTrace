@@ -112,7 +112,8 @@ int wmain(int argc, wchar_t **argv) {
     int cycles{}, failures{};
     bool promptMetricsPassed = false;
     bool framePassed = true, keyboardPassed = false, directEditOpened = false,
-         clearCancelPassed = false, reminderScrollPassed = false;
+         clearCancelPassed = false, reminderScrollPassed = false,
+         historicalIdentityPassed = false, mergeIdentityPassed = false;
     bool reminderSaved = false, renamed = false, merged = false, settingsVisited = false,
          deviceSaved = false, addedSaved = false;
     constexpr int warmupCycles = 7, measuredCycles = 12;
@@ -145,6 +146,18 @@ int wmain(int argc, wchar_t **argv) {
             capture(window, output + L".overview.bmp");
             click(window, 200, static_cast<int>(height * .60f + 74));
             capture(window, output + L".detail.bmp");
+            // An empty historical date must retain the selected application's identity.
+            click(window, width / 2 - 156, 112);
+            capture(window, output + L".detail-history.bmp");
+            click(window, width - edge - 192, height - 38);
+            auto rename = findWindow(app.dwProcessId, L"TimeTrace.Rename");
+            if (rename) {
+                wchar_t initial[80]{};
+                GetWindowTextW(GetDlgItem(rename, 100), initial, 80);
+                historicalIdentityPassed = wcscmp(initial, L"Google Chrome") == 0;
+                finishDialog(rename, IDCANCEL);
+            }
+            click(window, width / 2, 112);
             click(window, width - edge - 196, static_cast<int>(height * .60f + 80));
             auto dialog = findWindow(app.dwProcessId, L"TimeTrace.Reminder");
             if (dialog) {
@@ -210,6 +223,15 @@ int wmain(int argc, wchar_t **argv) {
                     finishDialog(dialog, IDOK);
                     merged = true;
                     Sleep(300);
+                    capture(window, output + L".detail-merged.bmp");
+                    click(window, width - edge - 192, height - 38);
+                    auto renamedDialog = findWindow(app.dwProcessId, L"TimeTrace.Rename");
+                    if (renamedDialog) {
+                        wchar_t initial[80]{};
+                        GetWindowTextW(GetDlgItem(renamedDialog, 100), initial, 80);
+                        mergeIdentityPassed = wcscmp(initial, L"演示应用") == 0;
+                        finishDialog(renamedDialog, IDCANCEL);
+                    }
                 } else
                     SendMessageW(dialog, WM_CLOSE, 0, 0);
             }
@@ -342,13 +364,16 @@ int wmain(int argc, wchar_t **argv) {
         sqlite3_stmt *s{};
         if (sqlite3_prepare_v2(
                 db,
-                "SELECT (SELECT name FROM app_labels WHERE app='chrome')='演示应用',"
-                "(SELECT target FROM app_links WHERE app='chrome')='code',"
-                "(SELECT duration FROM reminder_rules WHERE app='code')=60000 AND "
+                "WITH roots AS (SELECT COALESCE((SELECT target FROM app_links WHERE "
+                "app='chrome'),'chrome') chrome,COALESCE((SELECT target FROM app_links "
+                "WHERE app='explorer'),'explorer') explorer) "
+                "SELECT (SELECT name FROM app_labels WHERE app=roots.chrome)='演示应用',"
+                "(SELECT target FROM app_links WHERE app='code')=roots.chrome,"
+                "(SELECT duration FROM reminder_rules WHERE app=roots.chrome)=60000 AND "
                 "(SELECT duration FROM reminder_rules WHERE kind=0)=2700000 AND "
                 "(SELECT enabled FROM reminder_rules WHERE kind=0)=1 AND "
-                "(SELECT duration FROM reminder_rules WHERE app='explorer')=1800000 "
-                "AND (SELECT SUM(duration) FROM segments WHERE app='chrome')=4860000",
+                "(SELECT duration FROM reminder_rules WHERE app=roots.explorer)=1800000 "
+                "AND (SELECT SUM(duration) FROM segments WHERE app='chrome')=4860000 FROM roots",
                 -1, &s, nullptr) == SQLITE_OK) {
             persisted = sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int(s, 0) &&
                         sqlite3_column_int(s, 1) && sqlite3_column_int(s, 2);
@@ -361,7 +386,8 @@ int wmain(int argc, wchar_t **argv) {
     bool passed = !failures && cycles == warmupCycles + measuredCycles && alive && reminderSaved &&
                   renamed && merged && persisted && settingsVisited && deviceSaved && addedSaved &&
                   framePassed && promptMetricsPassed && keyboardPassed && directEditOpened &&
-                  clearCancelPassed && reminderScrollPassed && afterGdi <= baseGdi + 5 &&
+                  clearCancelPassed && reminderScrollPassed && historicalIdentityPassed &&
+                  mergeIdentityPassed && afterGdi <= baseGdi + 5 &&
                   afterUser <= baseUser + 5 && memory.PrivateWorkingSetSize <= 50000000;
     file << "{\n  \"cycles\": " << cycles << ",\n  \"failures\": " << failures
          << ",\n  \"native_prompt_metrics\": " << (promptMetricsPassed ? "true" : "false")
@@ -370,6 +396,10 @@ int wmain(int argc, wchar_t **argv) {
          << ",\n  \"native_reminder_dialog_saved\": " << (reminderSaved ? "true" : "false")
          << ",\n  \"native_rename_saved\": " << (renamed && persisted ? "true" : "false")
          << ",\n  \"native_merge_saved\": " << (merged && persisted ? "true" : "false")
+         << ",\n  \"native_historical_identity\": "
+         << (historicalIdentityPassed ? "true" : "false")
+         << ",\n  \"native_merge_kept_current_identity\": "
+         << (mergeIdentityPassed ? "true" : "false")
          << ",\n  \"native_device_and_add_saved\": "
          << (deviceSaved && addedSaved && persisted ? "true" : "false")
          << ",\n  \"native_inline_reminder_edit\": " << (directEditOpened ? "true" : "false")

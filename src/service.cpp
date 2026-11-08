@@ -8,9 +8,13 @@ namespace tt {
 Service::Service(std::filesystem::path dir, HWND target)
     : directory_(std::move(dir)), target_(target), thread_([this] { run(); }) {}
 Service::~Service() {
+    finish();
+}
+bool Service::finish() {
     send({Command::Stop});
     if (thread_.joinable())
         thread_.join();
+    return shutdownSaved_;
 }
 void Service::send(Command command) {
     if (!alive_)
@@ -42,8 +46,19 @@ void Service::run() {
         engine.load(db.reminderRules(), db.reminderStates(today), db.dailyUsage(today), today,
                     true);
         auto mapping = db.appMappings();
-        std::set<std::string> registered;
+        std::map<std::string, ResolvedApp> registered;
+        std::map<std::string, ResolvedApp> registrations;
+        for (const auto &app : db.identitySources()) {
+            if (!app.id.starts_with("app:"))
+                registrations.emplace(app.id, resolver.identify(app));
+        }
         std::vector<Usage> pending;
+        struct Activity {
+            Usage usage;
+            std::string day;
+            bool interrupted{};
+        };
+        std::deque<Activity> activities;
         Sample latest{};
         std::wstring error;
         std::unordered_map<std::string, std::shared_ptr<void>> icons;
@@ -63,24 +78,66 @@ void Service::run() {
         Timeline timeline(
             [&](const Usage &usage) {
                 for (const auto &part : splitLocal(usage)) {
-                    changeDay(part.day);
-                    auto root = mapping.find(usage.app);
-                    engine.add(root == mapping.end() ? usage.app : root->second, part.duration);
-                    if (usage.app.empty())
-                        continue;
-                    if (!pending.empty() && pending.back().app == usage.app &&
-                        pending.back().startUtc + pending.back().duration == part.startUtc)
-                        pending.back().duration += part.duration;
+                    if (!activities.empty() && !activities.back().interrupted &&
+                        activities.back().day == part.day &&
+                        activities.back().usage.app == usage.app &&
+                        activities.back().usage.startUtc + activities.back().usage.duration ==
+                            part.startUtc)
+                        activities.back().usage.duration += part.duration;
                     else
-                        pending.push_back({usage.app, part.startUtc, part.duration});
+                        activities.push_back({{usage.app, part.startUtc, part.duration}, part.day});
                 }
             },
-            [&] { engine.resetDevice(); });
+            [&] {
+                if (activities.empty() || !activities.back().interrupted)
+                    activities.push_back({{}, {}, true});
+            });
         auto reload = [&](bool resetDevice = false) {
-            auto day = localDay(utcNow());
+            auto day = engine.day();
             engine.load(db.reminderRules(), db.reminderStates(day), db.dailyUsage(day), day,
                         resetDevice);
             mapping = db.appMappings();
+        };
+        bool mappingsChanged = false;
+        auto consume = [&] {
+            if (mappingsChanged) {
+                reload();
+                mappingsChanged = false;
+            }
+            if (!registrations.empty()) {
+                // Commit the old mapping before regrouping reminder rules and states.
+                persist();
+                for (auto it = registrations.begin(); it != registrations.end();) {
+                    const auto &app = it->second;
+                    db.registerApp(app.source, app.representative);
+                    mappingsChanged = true;
+                    registered.insert_or_assign(it->first, app);
+                    it = registrations.erase(it);
+                }
+                reload();
+                mappingsChanged = false;
+            }
+            // Timeline callbacks never write to SQLite. A failed day transition leaves
+            // this unconsumed event queued while Timeline still advances exactly once.
+            while (!activities.empty()) {
+                const auto &activity = activities.front();
+                if (activity.interrupted) {
+                    engine.resetDevice();
+                } else {
+                    changeDay(activity.day);
+                    const auto &usage = activity.usage;
+                    auto root = mapping.find(usage.app);
+                    engine.add(root == mapping.end() ? usage.app : root->second, usage.duration);
+                    if (!usage.app.empty()) {
+                        if (!pending.empty() && pending.back().app == usage.app &&
+                            pending.back().startUtc + pending.back().duration == usage.startUtc)
+                            pending.back().duration += usage.duration;
+                        else
+                            pending.push_back(usage);
+                    }
+                }
+                activities.pop_front();
+            }
         };
         auto available = [&] {
             return latest.tick > 0 && !latest.paused && !latest.locked && !latest.sleeping &&
@@ -117,38 +174,44 @@ void Service::run() {
                     if (app.id == view.rule.app)
                         view.name = app.name;
             }
-            std::vector<AppRow *> needed;
-            for (auto &row : data->apps)
-                if (row.app.id == command.app)
-                    needed.push_back(&row);
-            for (bool reminders : {true, false})
-                for (auto &row : data->apps) {
-                    if (needed.size() >= 64)
+            auto needed = command.iconApps;
+            if (needed.empty())
+                for (const auto &row : data->apps) {
+                    if (needed.size() >= std::min<size_t>(64, command.iconCount))
                         break;
-                    if (reminders &&
-                        !std::any_of(data->reminders.begin(), data->reminders.end(),
-                                     [&](const auto &view) { return view.rule.app == row.app.id; }))
-                        continue;
-                    if (std::find(needed.begin(), needed.end(), &row) == needed.end())
-                        needed.push_back(&row);
+                    needed.push_back(row.app.id);
                 }
+            if (!data->selected.app.id.empty())
+                needed.insert(needed.begin(), data->selected.app.id);
+            std::set<std::string> unique;
+            std::erase_if(needed, [&](const auto &id) { return !unique.insert(id).second; });
+            if (needed.size() > 64)
+                needed.resize(64);
             std::erase_if(icons, [&](const auto &item) {
-                return std::none_of(needed.begin(), needed.end(),
-                                    [&](const auto *row) { return row->app.id == item.first; });
+                return std::find(needed.begin(), needed.end(), item.first) == needed.end();
             });
-            for (auto row : needed) {
-                auto [found, inserted] = icons.try_emplace(row->app.id);
+            for (const auto &id : needed) {
+                auto app = std::find_if(data->catalog.begin(), data->catalog.end(),
+                                        [&](const auto &entry) { return entry.id == id; });
+                if (app == data->catalog.end())
+                    continue;
+                auto [found, inserted] = icons.try_emplace(id);
                 // Cache failures too; keep only this view's icons, up to 64 handles.
                 if (inserted)
-                    found->second = loadAppIcon(row->app.path);
-                row->icon = found->second;
+                    found->second = loadAppIcon(app->path);
             }
+            for (auto &row : data->apps)
+                if (auto found = icons.find(row.app.id); found != icons.end())
+                    row.icon = found->second;
+            if (auto found = icons.find(data->selected.app.id); found != icons.end())
+                data->selected.icon = found->second;
             data->paused = latest.paused;
             data->error = error;
             if (PostMessageW(target_, WM_SNAPSHOT, 0, reinterpret_cast<LPARAM>(data.get())))
                 data.release();
         };
         bool previousPaused = false, stop = false;
+        unsigned stopAttempts{};
         while (!stop) {
             Command command;
             {
@@ -158,31 +221,40 @@ void Service::run() {
                 queue_.pop_front();
             }
             try {
+                error.clear();
                 switch (command.kind) {
                 case Command::Observe: {
                     if (latest.tick && command.sample.tick < latest.tick)
                         break;
                     latest = command.sample;
+                    bool collecting = !latest.paused && !latest.locked && !latest.sleeping;
+                    auto app =
+                        collecting ? resolver.resolve(latest.window, latest.pid) : ResolvedApp{};
+                    if (!app.source.id.empty()) {
+                        auto previous = registered.find(app.source.id);
+                        if (previous == registered.end() ||
+                            previous->second.representative.id != app.representative.id ||
+                            previous->second.representative.name != app.representative.name ||
+                            previous->second.representative.path != app.representative.path ||
+                            previous->second.source.name != app.source.name ||
+                            previous->second.source.path != app.source.path)
+                            registrations.insert_or_assign(app.source.id, app);
+                    }
+                    timeline.observe(
+                        {latest.tick, latest.utc, latest.lastInput, app.source.id, collecting});
+                    consume();
+                    changeDay(localDay(latest.utc));
                     if (previousPaused != latest.paused) {
                         db.setSetting("paused", latest.paused ? "1" : "0");
                         previousPaused = latest.paused;
                     }
-                    bool collecting = !latest.paused && !latest.locked && !latest.sleeping;
-                    auto app = collecting ? resolver.resolve(latest.window, latest.pid) : AppInfo{};
-                    if (!app.id.empty() && registered.insert(app.id).second) {
-                        db.app(app);
-                        if (!mapping.contains(app.id))
-                            mapping[app.id] = app.id;
-                    }
-                    timeline.observe(
-                        {latest.tick, latest.utc, latest.lastInput, app.id, collecting});
-                    changeDay(localDay(latest.utc));
                     evaluate();
                     if (latest.tick - savedTick >= 5000)
                         persist();
                     break;
                 }
                 case Command::Query:
+                    consume();
                     persist();
                     evaluate();
                     snapshot(command);
@@ -191,6 +263,7 @@ void Service::run() {
                     icons.clear();
                     break;
                 case Command::SetReminder: {
+                    consume();
                     persist();
                     auto changed = db.setReminder(command.app, command.value, command.enabled);
                     if (changed)
@@ -199,11 +272,13 @@ void Service::run() {
                     break;
                 }
                 case Command::RemoveReminder:
+                    consume();
                     persist();
                     db.removeReminder(command.value);
                     reload();
                     break;
                 case Command::ActOnReminder: {
+                    consume();
                     changeDay(localDay(utcNow()));
                     auto before = engine;
                     if (engine.apply(command.action)) {
@@ -217,9 +292,11 @@ void Service::run() {
                     break;
                 }
                 case Command::Rename:
+                    consume();
                     db.renameApp(command.app, command.name);
                     break;
                 case Command::Merge:
+                    consume();
                     persist();
                     db.mergeApps(command.app, command.target);
                     reload();
@@ -228,15 +305,17 @@ void Service::run() {
                 case Command::Clear:
                     db.clear();
                     pending.clear();
+                    activities.clear();
                     timeline.reset();
                     reload(true);
                     break;
                 case Command::Stop:
+                    consume();
                     persist();
+                    shutdownSaved_ = true;
                     stop = true;
                     break;
                 }
-                error.clear();
             } catch (const std::exception &e) {
                 error = L"记录保存失败：" + wide(e.what());
                 auto data = new Snapshot;
@@ -245,13 +324,14 @@ void Service::run() {
                 data->request = command.request;
                 if (!PostMessageW(target_, WM_SNAPSHOT, 0, reinterpret_cast<LPARAM>(data)))
                     delete data;
-                if (pending.size() > 8192) {
-                    pending.clear();
-                    timeline.reset();
-                    reload(true);
+                if (command.kind == Command::Stop) {
+                    if (++stopAttempts < 2) {
+                        Sleep(100);
+                        send({Command::Stop});
+                    } else {
+                        stop = true;
+                    }
                 }
-                if (command.kind == Command::Stop)
-                    stop = true;
             }
         }
     } catch (const std::exception &e) {

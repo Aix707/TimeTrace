@@ -1,0 +1,22 @@
+{
+  "source_opened_read_only": true,
+  "source_schema": 4,
+  "target_schema": 5,
+  "applications": 104,
+  "intervals": 5419,
+  "unchanged_tables": {
+    "apps": true,
+    "segments": true,
+    "app_labels": true,
+    "app_links": true,
+    "settings": true,
+    "reminder_rules": true,
+    "reminder_states": true
+  },
+  "segments_sha256_before": "1fb43884643de1a8c6e7e3b1d74bac0d8421bc4f355960a4cfd9231b878bb653",
+  "segments_sha256_after": "1fb43884643de1a8c6e7e3b1d74bac0d8421bc4f355960a4cfd9231b878bb653",
+  "total_unchanged": true,
+  "legacy_thresholds_preserved": true,
+  "new_device_disabled_sixty_minutes": false,
+  "passed": true
+}

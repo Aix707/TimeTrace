@@ -33,7 +33,7 @@ LRESULT CALLBACK promptProc(HWND h, UINT message, WPARAM w, LPARAM l) {
         const bool choice = p->kind == Prompt::Merge || p->kind == Prompt::AddReminder;
         if (choice) {
             if (p->kind == Prompt::Merge)
-                control(L"STATIC", L"合并到", 0, 24, 54, 332, 26);
+                control(L"STATIC", L"选择要并入的记录", 0, 24, 54, 332, 26);
             p->combo = control(L"COMBOBOX", L"", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, 24,
                                p->kind == Prompt::Merge ? 87 : 50, 332, 240,
                                p->kind == Prompt::Merge ? 100 : 101);
@@ -56,7 +56,7 @@ LRESULT CALLBACK promptProc(HWND h, UINT message, WPARAM w, LPARAM l) {
         }
         if (p->kind == Prompt::Merge) {
             p->edit = p->combo;
-            control(L"STATIC", L"合并历史与今后统计。\n优先保留所选应用的名称和提醒。", 0, 24, 133,
+            control(L"STATIC", L"所选记录将计入上方应用。\n保留当前应用的名称和提醒。", 0, 24, 133,
                     332, 48);
         } else {
             auto caption = p->kind == Prompt::Rename ? L"名称（最多 40 字）"
@@ -157,7 +157,7 @@ bool showPrompt(HWND owner, Prompt &p) {
     int width = MulDiv(396, dpi, 96), height = MulDiv(tall ? 286 : 242, dpi, 96);
     const wchar_t *title = p.kind == Prompt::Reminder ? (p.device ? L"休息提醒" : L"应用提醒")
                            : p.kind == Prompt::Rename ? L"重命名"
-                           : p.kind == Prompt::Merge  ? L"合并应用"
+                           : p.kind == Prompt::Merge  ? L"合并记录"
                                                       : L"添加应用提醒";
     auto dialog =
         CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, title, WS_CAPTION | WS_SYSMENU,
