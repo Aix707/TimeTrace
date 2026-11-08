@@ -677,11 +677,11 @@ void groupManagementTests(const std::filesystem::path &dir) {
                 "Selecting an existing member changes the group's primary identity");
         snapshot = db.snapshot(day, false, "target");
         state = db.reminderStates(day).front();
-        require(snapshot.selected.app.id == "b" && snapshot.selected.app.name == L"Current group" &&
+        require(snapshot.selected.app.id == "b" && snapshot.selected.app.name == L"Named helper" &&
                     snapshot.selected.app.path == L"b.exe" && snapshot.selectedTotal == 4000 &&
                     snapshot.members.size() == 2 && snapshot.members.front().app.id == "b" &&
                     db.appMappings()["target"] == "b",
-                "Primary selection preserves the displayed group name, member usage, and flat "
+                "Primary selection uses the selected source name, preserving usage and flat "
                 "mappings");
         require(
             db.reminderRules().back().id == reminder && db.reminderRules().back().app == "b" &&
@@ -714,7 +714,7 @@ void groupManagementTests(const std::filesystem::path &dir) {
         require(
             rejected && db.appMappings() == mapping && db.reminderRules().back().app == "b" &&
                 db.reminderStates(day).front().token == "primary-token" &&
-                db.snapshot(day, false, "b").selected.app.name == L"Current group",
+                db.snapshot(day, false, "b").selected.app.name == L"Named helper",
             "Failed primary selection rolls back labels, mappings, and reminder identity together");
         rawSql(file, "DROP TRIGGER fail_primary;");
         db.unmergeApp("b", "target");
@@ -788,12 +788,12 @@ void groupManagementTests(const std::filesystem::path &dir) {
     {
         Storage db(file);
         require(
-            scalar(file, "PRAGMA user_version") == 6 &&
+            scalar(file, "PRAGMA user_version") == 7 &&
                 scalar(file, "SELECT COUNT(*) FROM apps WHERE separate_from<>''") == 0 &&
                 db.appMappings()["source"] == "group" &&
                 db.snapshot(day, false, "group").selectedTotal == 1234 &&
                 db.snapshot(day, false, "group").selected.app.name == L"Custom group",
-            "Schema five upgrades to six with existing names, mappings, and raw usage preserved");
+            "Schema five upgrades to seven with existing names, mappings, and raw usage preserved");
     }
 }
 void migrationTests(const std::filesystem::path &dir) {
@@ -820,7 +820,7 @@ void migrationTests(const std::filesystem::path &dir) {
             rawSql(file, "INSERT INTO app_labels VALUES('b','custom');INSERT INTO app_links "
                          "(app,target) VALUES('c','b');");
         Storage db(file);
-        require(scalar(file, "PRAGMA user_version") == 6, "Schema one and two upgrade to six");
+        require(scalar(file, "PRAGMA user_version") == 7, "Schema one and two upgrade to seven");
         require(
             scalar(file, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('limits','notices')") ==
                 0,
@@ -949,16 +949,18 @@ void optimizationTests(const std::filesystem::path &dir) {
             "New profiles never create legacy tables");
         require(db.applications().empty(), "Empty catalog is cached");
         db.app({"a", L"A", L"a.exe"});
-        require(db.applications().size() == 1, "New metadata invalidates catalog");
+        require(db.applications().empty(), "Metadata alone creates no visible application");
         db.app({"a", L"Updated", L"new.exe"});
-        require(db.applications()[0].name == L"Updated" && db.applications()[0].path == L"new.exe",
+        require(db.snapshot(day, false, "a").selected.app.name == L"Updated" &&
+                    db.snapshot(day, false, "a").selected.app.path == L"new.exe",
                 "Metadata changes invalidate cached names and paths");
         db.renameApp("a", L"Custom");
-        require(db.applications()[0].name == L"Custom", "Rename invalidates catalog");
+        require(db.snapshot(day, false, "a").selected.app.name == L"Custom",
+                "Rename invalidates details");
         db.app({"b", L"B", {}});
         db.setReminder("b", 60000);
-        require(db.snapshot(day, false).apps.empty() && db.applications().size() == 2,
-                "Zero-use reminder applications stay in the catalog outside the ranking");
+        require(db.snapshot(day, false).apps.empty() && db.applications().empty(),
+                "Zero-use applications remain absent from the application picker");
         bool failed = false;
         try {
             db.save({{"a", monday, 1000}, {"missing", monday + 1000, 1000}});
@@ -989,7 +991,7 @@ void optimizationTests(const std::filesystem::path &dir) {
                  "user_version=3;");
     {
         Storage db(file);
-        require(scalar(file, "PRAGMA user_version") == 6 && db.snapshot(day, true).total == 168000,
+        require(scalar(file, "PRAGMA user_version") == 7 && db.snapshot(day, true).total == 168000,
                 "Schema three upgrades without discarding history");
         auto state = db.reminderStates(day).front();
         require(state.token == "keep-token" && state.muted && state.next == 12345,
@@ -997,7 +999,7 @@ void optimizationTests(const std::filesystem::path &dir) {
         require(db.appMappings()["a"] == "b", "Upgrade preserves application groups");
         db.clear();
         require(db.snapshot(day, true).total == 0 && db.reminderRules().size() == 2 &&
-                    db.applications().size() == 1 && db.reminderStates(day).empty(),
+                    db.applications().empty() && db.reminderStates(day).empty(),
                 "Clear resets usage and states while retaining cached catalog and rules");
     }
     rawSql(file, "PRAGMA user_version=99;");
@@ -1013,89 +1015,191 @@ void optimizationTests(const std::filesystem::path &dir) {
     std::filesystem::remove(file.wstring() + L"-wal");
     std::filesystem::remove(file.wstring() + L"-shm");
 }
+void nameMigrationTests(const std::filesystem::path &dir) {
+    auto file = dir / L"name-migration.db";
+    const Millis start = 1700000000000;
+    auto day = localDay(start);
+    int64_t targetRule{};
+    {
+        Storage db(file);
+        db.app({"a", L"First", L"first.exe"});
+        db.app({"b", L"Second", L"second.exe"});
+        db.app({"c", L"Component", L"component.exe"});
+        db.app({"d", L"Independent", L"independent.exe"});
+        db.save({{"a", start, 1000},
+                 {"b", start + 1000, 2000},
+                 {"c", start + 3000, 3000},
+                 {"d", start + 6000, 4000}});
+        db.mergeApps("c", "b");
+        db.setReminder("a", 60000);
+        db.setReminder("b", 120000);
+        auto rules = db.reminderRules();
+        targetRule = rules.back().id;
+        db.commit({}, {{rules[1].id, day, 0, true, true, "old-a"},
+                       {targetRule, day, 305000, false, false, "old-b"}});
+    }
+    rawSql(file, "INSERT INTO app_labels VALUES('a','Same'),('b','Same');PRAGMA user_version=6;");
+    {
+        Storage db(file);
+        auto view = db.snapshot(day, false, "b");
+        require(scalar(file, "PRAGMA user_version") == 7 && db.applications().size() == 2 &&
+                    db.appMappings()["a"] == "b" && db.appMappings()["c"] == "b" &&
+                    view.selectedTotal == 6000 && view.total == 10000 && view.members.size() == 3,
+                "Schema six combines equal names while preserving the existing manual primary and "
+                "members");
+        require(scalar(file, "SELECT COUNT(*)=4 AND SUM(duration)=10000 FROM segments") == 1 &&
+                    scalar(file, "SELECT COUNT(*) FROM app_labels WHERE name='Same'") == 2,
+                "Name migration preserves every raw interval and each original source label");
+        auto state = db.reminderStates(day).front();
+        require(
+            db.reminderRules().back().id == targetRule &&
+                db.reminderRules().back().threshold == 120000 && state.muted &&
+                state.next == 306000 && state.token.empty(),
+            "Equal-name migration retains target reminder priority, silence and remaining snooze");
+        db.setPrimary("b", "a");
+        require(db.snapshot(day, false, "a").selected.app.name == L"Same" &&
+                    db.snapshot(day, false, "a").selected.app.path == L"first.exe",
+                "Migrated source labels still follow primary selection");
+    }
+    std::filesystem::remove(file);
+    file = dir / L"name-refresh.db";
+    {
+        Storage db(file);
+        db.app({"product", L"Product", L"product.exe"});
+        db.app({"old-helper", L"SDKExternal", L"missing-old.exe"});
+        db.app({"new-helper", L"SDKExternal", L"current.exe"});
+        db.save({{"product", start, 10000},
+                 {"old-helper", start + 10000, 1000},
+                 {"new-helper", start + 11000, 500}});
+        db.setReminder("old-helper", 60000);
+        auto rule = db.reminderRules().back().id;
+        db.commit({}, {{rule, day, 301500, false, true, "component-occurrence"}});
+        require(
+            db.registerApp({"new-helper", L"SDKExternal", L"current.exe"},
+                           {"app:product", L"Product", L"product.exe"}) == "product" &&
+                db.appMappings()["old-helper"] == "product" && db.applications().size() == 1,
+            "A newly identified version also classifies its existing same-name component sources");
+        require(db.snapshot(day, false, "product").selectedTotal == 11500 &&
+                    db.reminderRules().back().id == rule &&
+                    db.reminderStates(day).front().next == 311500 &&
+                    db.reminderStates(day).front().token == "component-occurrence",
+                "Refreshing an automatic component group preserves all original usage and "
+                "remaining snooze");
+    }
+    std::filesystem::remove(file);
+}
 void identityStorageTests(const std::filesystem::path &dir) {
     auto file = dir / L"identities.db";
     const Millis start = 1700000000000;
     const auto day = localDay(start);
-    const AppInfo group{"app:sample", L"Sample", L"sample.exe"};
     {
         Storage db(file);
-        db.app({"sample-helper.exe", L"Sample Helper", L"sample-helper.exe"});
-        require(!db.applications()[0].hasUsage, "Catalog metadata alone does not count as use");
-        db.save({{"sample-helper.exe", start, 400}});
-        require(db.registerApp({"sample-helper.exe", L"Sample Helper", L"sample-helper.exe"},
-                               group) == group.id,
-                "Confident identity registration returns the display application");
-        require(db.applications().size() == 1 && db.applications()[0].hasUsage &&
-                    db.snapshot(day, false).total == 400,
-                "Automatic grouping preserves subsecond use and propagates activity");
-        require(scalar(file, "SELECT COUNT(*) FROM segments WHERE app='sample-helper.exe'") == 1,
-                "Automatic grouping retains original interval identity");
-        auto refreshed = group;
-        refreshed.name = L"Sample Updated";
-        db.registerApp({"sample-helper.exe", L"Sample Helper", L"sample-helper.exe"}, refreshed);
-        require(db.applications()[0].name == L"Sample Updated",
-                "Repeated registration refreshes representative metadata");
-        require(db.identitySources().size() == 2,
-                "Startup identity sources include aliases and representatives");
-        auto history = db.snapshot(shiftDay(day, -1), false, "sample-helper.exe");
-        require(history.apps.empty() && history.selected.app.id == group.id &&
-                    history.selected.used == 0 && history.selectedTotal == 0,
-                "Historical zero-use details retain selected application metadata");
-        db.app({"new-helper", L"New Helper", L"new-helper.exe"});
-        const AppInfo newGroup{"app:new", L"New", L"new.exe"};
-        db.registerApp({"new-helper", L"New Helper", L"new-helper.exe"}, newGroup);
-        require(!db.applications()[0].hasUsage, "Unused representative remains distinguishable");
-        db.save({{"new-helper", start + 400, 1000}});
-        auto fresh = db.applications();
-        require(std::all_of(fresh.begin(), fresh.end(), [](const auto &a) { return a.hasUsage; }),
-                "First committed interval invalidates catalog and marks its representative used");
-
-        db.app({"manual", L"Manual", {}});
-        db.renameApp("manual", L"User Name");
-        require(db.registerApp({"manual", L"Metadata", {}}, group) == "manual",
-                "Automatic grouping respects explicit user names");
-        db.app({"child", L"Child", {}});
-        db.mergeApps("child", "manual");
-        require(db.registerApp({"child", L"Child", {}}, group) == "manual" &&
-                    db.registerApp({"manual", L"Metadata", {}}, group) == "manual",
-                "Automatic grouping respects both members and roots of manual groups");
-
-        db.app({"conflicting", L"Conflicting", {}});
-        db.setReminder("conflicting", 60000);
-        db.setReminder(group.id, 120000);
-        require(db.registerApp({"conflicting", L"Conflicting", {}}, group) == "conflicting",
-                "Automatic grouping retains distinct user reminder configurations");
+        AppInfo first{"a", L"Main process", L"C:\\One\\client.exe", true, L"Sample"};
+        AppInfo second{"b", L"Web helper", L"C:\\Two\\web.exe", true, L" sample "};
+        db.app(first);
+        db.app(second);
+        require(db.applications().empty(),
+                "Recognized sources without records create no applications");
+        db.save({{"a", start, 1000}, {"b", start + 1000, 2000}});
+        auto group = db.appMappings()["a"];
+        require(db.appMappings()["b"] == group && db.applications().size() == 1 &&
+                    db.snapshot(day, false, group).selectedTotal == 3000,
+                "Same application name combines different paths and process descriptions");
+        require(db.identitySources().size() == 2 &&
+                    scalar(file, "SELECT COUNT(*) FROM segments") == 2,
+                "Name grouping needs no empty representative or rewritten original records");
+        db.setPrimary(group, "a");
+        db.renameApp("a", L"My Sample");
+        db.setReminder("a", 60000);
         auto rule = db.reminderRules().back().id;
-        db.commit({}, {{rule, day, 300400, false, false, "same-occurrence"}});
-        db.app({"second-helper", L"Second Helper", {}});
-        db.save({{"second-helper", start + 1400, 2000}});
-        db.registerApp({"second-helper", L"Second Helper", {}}, group);
-        auto states = db.reminderStates(day);
-        require(states[0].next == 302400 && states[0].token == "same-occurrence",
-                "Automatic grouping retains the existing token and remaining snooze");
-        db.registerApp({"second-helper", L"Second Helper", {}}, group);
-        require(db.reminderStates(day)[0].next == 302400,
-                "Repeated automatic grouping does not extend snooze again");
-        require(db.registerApp({"sample-helper.exe", L"Sample Helper", L"sample-helper.exe"},
-                               newGroup) == group.id &&
-                    db.appMappings()["sample-helper.exe"] == group.id,
-                "Changed identity evidence cannot split an established automatic group");
-        require(db.reminderStates(day)[0].next == 302400 &&
-                    db.reminderStates(day)[0].token == "same-occurrence" &&
-                    db.dailyUsage(day)[group.id] == 2400,
-                "Skipped regrouping preserves configured reminder state and cumulative use");
-
-        db.registerApp({"unknown:10", L"Unknown 10", {}});
-        db.registerApp({"unknown-frame:20", L"Unknown 20", {}});
+        db.commit({}, {{rule, day, 303000, false, true, "saved-occurrence"}});
+        db.setPrimary("a", "b");
+        auto view = db.snapshot(day, false, "b");
+        require(applicationNameKey(view.selected.app.name) == "sample" &&
+                    view.selected.app.path == second.path && view.selectedTotal == 3000 &&
+                    view.members.size() == 2,
+                "Primary selection switches both name and icon source, retaining all usage");
+        require(scalar(file, "SELECT COUNT(*) FROM app_labels WHERE app='b'") == 0,
+                "Selecting a source never copies another source's custom name");
+        db.renameApp("b", L"Second name");
+        db.setPrimary("b", "a");
+        view = db.snapshot(day, false, "a");
+        require(view.selected.app.name == L"My Sample" && view.selected.app.path == first.path &&
+                    db.reminderRules().back().id == rule && db.reminderRules().back().app == "a" &&
+                    db.reminderStates(day).front().token == "saved-occurrence" &&
+                    db.reminderStates(day).front().next == 303000,
+                "Switching primary back restores its saved name, icon path, reminder ID and state");
+        db.setPrimary("a", "b");
+        require(db.snapshot(day, false, "b").selected.app.name == L"Second name",
+                "Every source retains its own saved name on repeated primary switches");
+        db.setPrimary("b", "a");
+        db.registerApp({"c", L"New helper", L"C:\\Version3\\helper.exe", true, L"Sample"});
+        db.save({{"c", start + 3000, 500}});
+        require(db.appMappings()["c"] == "a" && db.applications().size() == 1 &&
+                    db.reminderStates(day).front().next == 303000,
+                "New same-name sources follow an existing renamed application without changing "
+                "records");
+        db.app({"other", L"Other", L"other.exe"});
+        db.save({{"other", start + 3500, 4000}});
         auto mappings = db.appMappings();
-        require(mappings["unknown:10"] == "app:unidentified" &&
-                    mappings["unknown-frame:20"] == "app:unidentified",
-                "Unidentified process instances share one stable display identity");
+        bool rejected = false;
+        try {
+            db.renameApp("other", L"My Sample");
+        } catch (...) {
+            rejected = true;
+        }
+        require(rejected && db.appMappings() == mappings &&
+                    db.snapshot(day, false, "other").selected.app.name == L"Other",
+                "Renaming to an existing application requires confirmed combined usage");
+        db.renameApp("other", L"Second name");
+        rejected = false;
+        try {
+            db.setPrimary("a", "b");
+        } catch (...) {
+            rejected = true;
+        }
+        require(rejected && db.appMappings() == mappings &&
+                    db.snapshot(day, false, "a").selected.app.name == L"My Sample",
+                "Primary name collisions roll back unless explicitly confirmed");
+        db.setPrimary("a", "b", true);
+        require(db.applications().size() == 1 &&
+                    db.snapshot(day, false, "b").selectedTotal == 7500 &&
+                    db.snapshot(day, false, "b").members.size() == 4,
+                "Confirmed primary collision combines the full classifications");
+        db.moveMember("b", "other", {}, L"Other");
+        require(db.applications().size() == 2 && db.appMappings()["other"] == "other" &&
+                    db.snapshot(day, false, "other").selectedTotal == 4000,
+                "A source can return to its own named application with its original usage");
+        db.moveMember("b", "a", "other");
+        require(db.appMappings()["a"] == "other" && db.appMappings()["b"] == "b" &&
+                    db.snapshot(day, false).total == 7500,
+                "Changing attribution moves only the chosen source, preserving total usage");
+        db.registerApp({"unknown:10", L"Unknown", {}});
+        db.registerApp({"unknown-frame:20", L"Unknown frame", {}});
+        db.save({{"unknown:10", start + 7500, 400}, {"unknown-frame:20", start + 7900, 600}});
+        view = db.snapshot(day, false);
+        require(view.unidentified == 1000 && view.total == 8500 && view.apps.size() == 2 &&
+                    db.applications().size() == 2,
+                "Unidentified usage contributes to totals outside the application list");
+    }
+    {
+        Storage db(file);
+        require(db.appMappings()["a"] == "other" && db.appMappings()["c"] == "b" &&
+                    db.snapshot(day, false, "b").selected.app.name == L"Second name" &&
+                    db.snapshot(day, false).total == 8500,
+                "Names, source assignments, primary and all records survive restart");
+        db.moveMember("b", "c", "other");
+        db.setPrimary("b", "b");
+        db.renameApp("b", L"Move into Other");
+        db.mergeApps("b", "other");
+        require(db.applications().size() == 1 &&
+                    db.snapshot(day, false, "other").selectedTotal == 7500,
+                "Moving the final group into another application removes the old classification");
         db.clear();
-        require(std::none_of(db.applications().begin(), db.applications().end(),
-                             [](const auto &a) { return a.hasUsage; }),
-                "Clear resets activity eligibility while preserving applications");
+        require(db.applications().empty() && db.reminderStates(day).empty() &&
+                    scalar(file, "SELECT name='My Sample' FROM app_labels WHERE app='a'") == 1,
+                "Clearing usage removes empty classifications while retaining each source's custom "
+                "name");
     }
     std::filesystem::remove(file);
 
@@ -1122,7 +1226,7 @@ void identityStorageTests(const std::filesystem::path &dir) {
            "PRAGMA user_version=4;");
     {
         Storage db(file);
-        require(scalar(file, "PRAGMA user_version") == 6 &&
+        require(scalar(file, "PRAGMA user_version") == 7 &&
                     scalar(file, "SELECT COUNT(*) FROM segments") == 3 &&
                     scalar(file, "SELECT SUM(duration) FROM segments") == 1500,
                 "Schema four upgrade retains every interval and total");
@@ -1130,8 +1234,9 @@ void identityStorageTests(const std::filesystem::path &dir) {
                     scalar(file, "SELECT manual FROM app_links WHERE app='a'") == 1,
                 "Schema four existing groups retain explicit ownership");
         auto snapshot = db.snapshot("2026-10-17", false);
-        require(snapshot.total == 1500 && snapshot.apps.size() == 2 &&
-                    snapshot.apps[0].app.name == L"Custom" && snapshot.apps[0].app.hasUsage,
+        require(snapshot.total == 1500 && snapshot.unidentified == 500 &&
+                    snapshot.apps.size() == 1 && snapshot.apps[0].app.name == L"Custom" &&
+                    snapshot.apps[0].app.hasUsage,
                 "Migration consolidates unidentified rows and derives catalog activity");
         require(db.reminderStates("2026-10-17")[0].token == "retain-token" &&
                     db.reminderStates("2026-10-17")[0].muted,
@@ -1164,6 +1269,7 @@ int wmain(int argc, wchar_t **argv) {
         migrationTests(dir);
         optimizationTests(dir);
         identityStorageTests(dir);
+        nameMigrationTests(dir);
         // Files are all fixed names in this process's test directory; never touch a user profile.
         for (auto name : {L"storage.db", L"merge.db", L"batch-merge.db", L"group-management.db",
                           L"schema5.db", L"v1.db", L"v2.db", L"midnight.db"})

@@ -54,6 +54,10 @@ bool genericName(const std::wstring &name) {
                                     L"ue5",
                                     L"unreal engine",
                                     L"chromium",
+                                    L"cef",
+                                    L"cefclient",
+                                    L"microsoft windows operating system",
+                                    L"microsoft® windows® operating system",
                                     L"webview2",
                                     L"microsoft edge webview2",
                                     L"application",
@@ -75,6 +79,13 @@ bool sameProduct(const std::wstring &a, const std::wstring &b) {
                std::wstring(L" .-_([{").find(longer[shorter.size()]) != std::wstring::npos;
     };
     return prefix(first, second) || prefix(second, first);
+}
+bool componentExecutable(const std::wstring &path) {
+    auto name = folded(std::filesystem::path(path).stem().wstring());
+    const wchar_t *roles[]{L"helper",    L"sdk",     L"webview", L"webclient",
+                           L"cefclient", L"install", L"updater", L"crashhandler"};
+    return std::any_of(std::begin(roles), std::end(roles),
+                       [&](auto role) { return name.find(role) != std::wstring::npos; });
 }
 std::wstring regText(HKEY key, const wchar_t *name) {
     DWORD size{}, type{};
@@ -299,10 +310,12 @@ ExecutableMetadata executableMetadata(const std::wstring &path) {
     return result;
 }
 std::wstring executableDisplayName(const ExecutableMetadata &metadata, const std::wstring &path) {
+    if (!genericName(metadata.product) &&
+        (genericName(metadata.description) || sameProduct(metadata.description, metadata.product) ||
+         componentExecutable(path) || componentExecutable(metadata.description)))
+        return metadata.product;
     if (!genericName(metadata.description))
         return metadata.description;
-    if (!genericName(metadata.product))
-        return metadata.product;
     return std::filesystem::path(path).stem().wstring();
 }
 struct IdentityCatalog::Impl {
@@ -334,6 +347,12 @@ IdentityCatalog::IdentityCatalog(std::vector<IdentityProduct> products)
 IdentityCatalog::~IdentityCatalog() = default;
 ResolvedApp IdentityCatalog::identify(const AppInfo &source, const IdentityContext &context) {
     ResolvedApp result{source, {}, "unverified"};
+    result.source.identified = source.identified && !source.id.starts_with("unknown:") &&
+                               !source.id.starts_with("unknown-frame:");
+    if (context.metadata.exists)
+        result.source.applicationName = executableDisplayName(context.metadata, source.path);
+    else if (result.source.applicationName.empty())
+        result.source.applicationName = source.name;
     if (source.id.rfind("app:", 0) == 0) {
         result.evidence = "logical-group";
         return result;
@@ -411,8 +430,9 @@ ResolvedApp IdentityCatalog::identify(const AppInfo &source, const IdentityConte
                 !company.empty() && (company == publisher || company == primaryPublisher);
             bool productMatch = sameProduct(context.metadata.product, product.name) ||
                                 sameProduct(context.metadata.product, primary.product);
+            bool componentMatch = companyMatch && componentExecutable(path);
             // Install roots can contain independent products from the same publisher.
-            if (!productMatch ||
+            if ((!productMatch && !componentMatch) ||
                 (!company.empty() && (!publisher.empty() || !primaryPublisher.empty()) &&
                  !companyMatch))
                 continue;

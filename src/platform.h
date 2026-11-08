@@ -46,6 +46,8 @@ struct Command {
     size_t iconCount{16};
     std::string mergeFor;
     std::vector<std::string> mergeApps;
+    std::string destination;
+    bool confirmed{};
 };
 class AppResolver {
   public:

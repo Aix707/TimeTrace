@@ -1,0 +1,30 @@
+{
+  "cases": [
+    {
+      "width": 1140,
+      "height": 810,
+      "weekly": false,
+      "top_region_identical": true
+    },
+    {
+      "width": 1140,
+      "height": 810,
+      "weekly": true,
+      "top_region_identical": true
+    },
+    {
+      "width": 920,
+      "height": 680,
+      "weekly": false,
+      "top_region_identical": true
+    },
+    {
+      "width": 920,
+      "height": 680,
+      "weekly": true,
+      "top_region_identical": true
+    }
+  ],
+  "passed": true,
+  "binary_sha256": "c9d428064e7d422f18cf2a75e821de976fdbaf7059263b5df7ac1ce5a268063a"
+}

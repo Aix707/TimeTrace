@@ -107,8 +107,8 @@ int wmain() {
             final.request = 10002;
             service.send(final);
             snapshot = waitSnapshot(host, final.request);
-            require(snapshot.total == 0 && snapshot.catalog.size() == 1,
-                    "Clear resets usage and keeps application metadata");
+            require(snapshot.total == 0 && snapshot.catalog.empty(),
+                    "Clear resets usage and hides classifications without records");
             Command paused;
             paused.sample = {tick + 60000, utc + 60000,           tick + 60000,
                              host,         GetCurrentProcessId(), true};
@@ -261,6 +261,13 @@ int wmain() {
                     "Removing one member restores independent usage without changing totals");
             require(notices.size() == noticeCount + 1,
                     "Editing group membership does not replay a delivered reminder");
+            service.send({Command::Clear});
+            auto cleared = query(service, host, day, 50009);
+            require(cleared.total == 0 && cleared.catalog.empty() &&
+                        std::all_of(cleared.reminders.begin(), cleared.reminders.end(),
+                                    [](const auto &reminder) { return !reminder.name.empty(); }),
+                    "Clearing usage hides empty classifications while retaining named reminder "
+                    "settings");
         }
         std::cout << "PASS: " << checks << " service checks\n";
     } catch (const std::exception &e) {

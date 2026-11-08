@@ -58,6 +58,16 @@ int main() {
                                        metadata(L"Suite Helper", L"Vendor"));
         require(helper.representative.id == exact.representative.id,
                 "publisher and concrete install root associate helper");
+        auto sdk = catalog.identify(source(L"C:\\Apps\\Suite\\thirdparty\\VendorSDKExternal.exe"),
+                                    metadata(L"VendorSDKExternal", L"Vendor"));
+        require(sdk.representative.id == exact.representative.id,
+                "a component role, matching publisher and specific install root supply the "
+                "application name");
+        auto foreign =
+            catalog.identify(source(L"C:\\Apps\\Suite\\thirdparty\\OtherSDKExternal.exe"),
+                             metadata(L"OtherSDKExternal", L"Other Vendor"));
+        require(foreign.representative.id.empty(),
+                "component roles alone never override a conflicting publisher");
         auto nested = catalog.identify(source(L"C:\\Apps\\Suite\\Editor\\bin\\helper.exe"),
                                        metadata(L"Editor Helper", L"Vendor"));
         require(nested.representative.id == "app:install:editor",
@@ -127,6 +137,18 @@ int main() {
         require(executableDisplayName({true, L"Ereader", L"Electron", {}}, L"C:\\Apps\\app.exe") ==
                     L"Ereader",
                 "specific descriptions are retained");
+        require(executableDisplayName({true, L"Suite Web Helper", L"Suite", L"Vendor"},
+                                      L"C:\\Apps\\Suite\\web.exe") == L"Suite",
+                "product names classify helpers without per-executable exceptions");
+        require(executableDisplayName(
+                    {true, L"File Explorer", L"Microsoft Windows Operating System", {}},
+                    L"C:\\Windows\\explorer.exe") == L"File Explorer",
+                "shared operating-system product names retain the specific application name");
+        require(executableDisplayName({true, L"Office Writer", L"Office Suite", {}},
+                                      L"C:\\Office\\writer.exe") == L"Office Writer" &&
+                    executableDisplayName({true, L"Office Sheets", L"Office Suite", {}},
+                                          L"C:\\Office\\sheets.exe") == L"Office Sheets",
+                "independent applications retain their names when a suite shares product metadata");
         IdentityCatalog launchCatalog(
             {{"product",
               L"Product",

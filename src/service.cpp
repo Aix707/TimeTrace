@@ -181,6 +181,8 @@ void Service::run() {
                 for (const auto &app : data->catalog)
                     if (app.id == view.rule.app)
                         view.name = app.name;
+                if (view.name.empty())
+                    view.name = db.displayName(view.rule.app);
             }
             auto needed = command.iconApps;
             if (needed.empty())
@@ -191,6 +193,10 @@ void Service::run() {
                 }
             if (!data->selected.app.id.empty())
                 needed.insert(needed.begin(), data->selected.app.id);
+            for (const auto &member : data->members)
+                needed.push_back(member.app.id);
+            for (const auto &candidate : data->mergeCandidates)
+                needed.push_back(candidate.app.id);
             std::set<std::string> unique;
             std::erase_if(needed, [&](const auto &id) { return !unique.insert(id).second; });
             if (needed.size() > 64)
@@ -201,18 +207,29 @@ void Service::run() {
             for (const auto &id : needed) {
                 auto app = std::find_if(data->catalog.begin(), data->catalog.end(),
                                         [&](const auto &entry) { return entry.id == id; });
-                if (app == data->catalog.end())
+                const AppInfo *source = app != data->catalog.end() ? &*app : nullptr;
+                if (!source)
+                    for (const auto &member : data->members)
+                        if (member.app.id == id)
+                            source = &member.app;
+                if (!source)
                     continue;
                 auto [found, inserted] = icons.try_emplace(id);
                 // Cache failures too; keep only this view's icons, up to 64 handles.
                 if (inserted)
-                    found->second = loadAppIcon(app->path);
+                    found->second = loadAppIcon(source->path);
             }
             for (auto &row : data->apps)
                 if (auto found = icons.find(row.app.id); found != icons.end())
                     row.icon = found->second;
             if (auto found = icons.find(data->selected.app.id); found != icons.end())
                 data->selected.icon = found->second;
+            for (auto &member : data->members)
+                if (auto found = icons.find(member.app.id); found != icons.end())
+                    member.icon = found->second;
+            for (auto &candidate : data->mergeCandidates)
+                if (auto found = icons.find(candidate.app.id); found != icons.end())
+                    candidate.icon = found->second;
             data->paused = latest.paused;
             data->error = error;
             if (PostMessageW(target_, WM_SNAPSHOT, 0, reinterpret_cast<LPARAM>(data.get())))
@@ -245,6 +262,8 @@ void Service::run() {
                             previous->second.representative.name != app.representative.name ||
                             previous->second.representative.path != app.representative.path ||
                             previous->second.source.name != app.source.name ||
+                            previous->second.source.applicationName != app.source.applicationName ||
+                            previous->second.source.identified != app.source.identified ||
                             previous->second.source.path != app.source.path)
                             registrations.insert_or_assign(app.source.id, app);
                     }
@@ -301,7 +320,10 @@ void Service::run() {
                 }
                 case Command::Rename:
                     consume();
-                    db.renameApp(command.app, command.name);
+                    persist();
+                    db.renameApp(command.app, command.name, command.confirmed);
+                    reload();
+                    evaluate();
                     break;
                 case Command::Merge:
                     consume();
@@ -316,14 +338,14 @@ void Service::run() {
                 case Command::Unmerge:
                     consume();
                     persist();
-                    db.unmergeApp(command.app, command.target);
+                    db.moveMember(command.app, command.target, command.destination, command.name);
                     reload();
                     evaluate();
                     break;
                 case Command::SetPrimary:
                     consume();
                     persist();
-                    db.setPrimary(command.app, command.target);
+                    db.setPrimary(command.app, command.target, command.confirmed);
                     reload();
                     evaluate();
                     break;

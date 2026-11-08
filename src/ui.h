@@ -75,6 +75,7 @@ class Ui {
     void promptReminder(const std::string &app, bool device = false, bool chooseApp = false);
     void promptApp(const std::string &app, bool merge);
     void promptMembers(const std::string &app);
+    bool confirmName(const std::string &app, const std::wstring &name, bool &confirmed);
     void drawReminders(ui::Canvas &canvas, float x, float right, float height);
     const ReminderView *reminder(const std::string &app) const;
     static LRESULT CALLBACK proc(HWND, UINT, WPARAM, LPARAM);

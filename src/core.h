@@ -48,6 +48,8 @@ struct AppInfo {
     std::string id;
     std::wstring name, path;
     bool hasUsage{true};
+    std::wstring applicationName;
+    bool identified{true};
 };
 struct AppRow {
     AppInfo app;
@@ -58,12 +60,14 @@ struct MergeCandidate {
     AppInfo app;
     bool related{};
     Millis used{};
+    std::shared_ptr<void> icon;
 };
 struct Snapshot {
     std::string day;
     bool weekly{}, paused{};
     uint64_t request{};
     Millis total{}, selectedTotal{};
+    Millis unidentified{};
     std::vector<Millis> buckets;
     std::vector<AppRow> apps;
     AppRow selected;
@@ -75,6 +79,7 @@ struct Snapshot {
     std::wstring error;
 };
 std::wstring formatDuration(Millis ms);
+std::string applicationNameKey(const std::wstring &name);
 std::string utf8(const std::wstring &value);
 std::wstring wide(const std::string &value);
 } // namespace tt

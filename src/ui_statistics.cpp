@@ -105,6 +105,10 @@ void Ui::drawOverview(ui::Canvas &c, float x, float right, float height) {
     float listTop = height * .60f;
     c.line(x, listTop - size::gap, right, listTop - size::gap, theme::separator);
     c.text(L"应用使用", {x, listTop, right, listTop + 32}, size::title, theme::text, 600);
+    if (snapshot_.unidentified > 0)
+        c.text(L"未识别用时 " + ui::timeText(snapshot_.unidentified),
+               {x + 128, listTop, right - 160, listTop + 32}, size::body, theme::secondary, 400,
+               DWRITE_TEXT_ALIGNMENT_TRAILING);
     int count = 0;
     for (const auto &row : snapshot_.apps)
         if (row.used > 0)
@@ -181,13 +185,13 @@ void Ui::drawDetail(ui::Canvas &c, float x, float right, float height) {
                true);
     } else
         c.rowText(L"此项暂无法设置提醒", {}, x + size::inset, rowTop, right - size::inset);
-    c.text(L"合并成员", {x, membersTop, x + 104, membersTop + size::control}, size::body,
+    c.text(L"应用来源", {x, membersTop, x + 104, membersTop + size::control}, size::body,
            theme::text, 600);
     std::wstring members;
     for (size_t i = 1; i < snapshot_.members.size(); ++i)
         members += (members.empty() ? L"" : L"、") + snapshot_.members[i].app.name;
     c.text(
-        members.empty() ? L"尚未合并" : members,
+        members.empty() ? L"单一来源" : members,
         {x + 112, membersTop, right - size::compactWidth - size::gap, membersTop + size::control},
         size::body, theme::secondary);
     if (!snapshot_.members.empty())

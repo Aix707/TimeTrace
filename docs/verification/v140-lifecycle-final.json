@@ -1,0 +1,115 @@
+{
+  "cycles": 19,
+  "failures": 0,
+  "native_prompt_metrics": true,
+  "native_window_frame": true,
+  "native_keyboard_navigation": true,
+  "native_reminder_dialog_saved": true,
+  "native_rename_saved": true,
+  "native_merge_saved": true,
+  "native_historical_identity": true,
+  "native_merge_kept_current_identity": true,
+  "native_merge_search_and_selection": true,
+  "native_merge_multiple_records": true,
+  "native_merge_usage_preview": true,
+  "native_merge_explicit_target": true,
+  "native_merge_related_selection": true,
+  "native_members_view": true,
+  "native_primary_changed": true,
+  "native_member_move_cancel": true,
+  "native_member_moved": true,
+  "native_member_remerged": true,
+  "native_device_and_add_saved": true,
+  "native_inline_reminder_edit": true,
+  "native_clear_history_cancel": true,
+  "native_reminder_scroll": true,
+  "autostart_test_skipped": true,
+  "backend_survived_window_close": true,
+  "baseline_gdi_handles": 67,
+  "final_gdi_handles": 67,
+  "baseline_user_handles": 48,
+  "final_user_handles": 47,
+  "private_working_set_after_cycles": 18030592,
+  "warmup_cycles": 7,
+  "measured_cycles": 12,
+  "handle_samples": [
+    [
+      54,
+      37
+    ],
+    [
+      58,
+      40
+    ],
+    [
+      64,
+      40
+    ],
+    [
+      64,
+      40
+    ],
+    [
+      64,
+      40
+    ],
+    [
+      64,
+      40
+    ],
+    [
+      67,
+      48
+    ],
+    [
+      67,
+      48
+    ],
+    [
+      67,
+      48
+    ],
+    [
+      67,
+      48
+    ],
+    [
+      67,
+      48
+    ],
+    [
+      67,
+      48
+    ],
+    [
+      67,
+      48
+    ],
+    [
+      67,
+      48
+    ],
+    [
+      67,
+      48
+    ],
+    [
+      67,
+      48
+    ],
+    [
+      67,
+      48
+    ],
+    [
+      67,
+      48
+    ],
+    [
+      67,
+      48
+    ]
+  ],
+  "passed": true,
+  "binary_sha256": "c9d428064e7d422f18cf2a75e821de976fdbaf7059263b5df7ac1ce5a268063a"
+}

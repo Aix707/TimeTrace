@@ -1,0 +1,11 @@
+{
+  "original_intervals": 7562,
+  "all_raw_intervals_identical": true,
+  "source_labels_preserved": true,
+  "manual_assignments_preserved": true,
+  "schema": 7,
+  "integrity_ok": true,
+  "installed_executable_matches_release": true,
+  "installed_bytes": 1298038,
+  "passed": true
+}

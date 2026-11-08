@@ -114,8 +114,7 @@ int wmain(int argc, wchar_t **argv) {
         std::vector<std::string> sources;
         Millis greatestRelatedUse{};
         for (const auto &app : catalog) {
-            if (!app.id.starts_with("app:install:"))
-                continue;
+
             auto candidates = resolver.mergeCandidates(catalog, app.id);
             std::vector<std::string> related;
             Millis used{};
@@ -125,7 +124,10 @@ int wmain(int argc, wchar_t **argv) {
                     if (auto found = before.find(candidate.app.id); found != before.end())
                         used += found->second;
                 }
-            if (!related.empty() && used > greatestRelatedUse) {
+            auto details = storage.snapshot(day, true, app.id);
+            bool existingMembers = details.members.size() > 1;
+            used += existingMembers ? details.selectedTotal : 0;
+            if ((!related.empty() || existingMembers) && used > greatestRelatedUse) {
                 target = app;
                 sources = std::move(related);
                 greatestRelatedUse = used;
@@ -149,18 +151,27 @@ int wmain(int argc, wchar_t **argv) {
         storage.mergeApps(sources, target.id);
         auto repeated = totals(storage.snapshot(day, true, target.id)) == expected &&
                         original == rawRows(working);
-        auto primary =
-            std::max_element(after.members.begin(), after.members.end(),
-                             [](const auto &a, const auto &b) { return a.used < b.used; });
-        if (primary == after.members.end() || primary->app.id == target.id)
-            throw std::runtime_error("Field copy has no larger merged source to promote");
+        auto primary = after.members.end();
+        for (auto member = after.members.begin(); member != after.members.end(); ++member) {
+            bool collision = std::any_of(catalog.begin(), catalog.end(), [&](const auto &app) {
+                return app.id != target.id &&
+                       applicationNameKey(app.name) == applicationNameKey(member->app.name);
+            });
+            if (member->app.id != target.id && member->used > 0 && !collision &&
+                (primary == after.members.end() || member->used > primary->used))
+                primary = member;
+        }
+        if (primary == after.members.end())
+            throw std::runtime_error(
+                "Field copy has no source with a distinct available display name");
         auto primaryId = storage.setPrimary(target.id, primary->app.id);
         auto promoted = storage.snapshot(day, true, primaryId);
         auto expectedPromoted = expected;
         expectedPromoted[primaryId] = expectedPromoted[target.id];
         expectedPromoted.erase(target.id);
         bool primaryPreserved = totals(promoted) == expectedPromoted &&
-                                promoted.selected.app.name == target.name &&
+                                promoted.selected.app.name == primary->app.name &&
+                                promoted.selected.app.path == primary->app.path &&
                                 original == rawRows(working);
         auto member =
             std::find_if(promoted.members.begin(), promoted.members.end(),
@@ -169,7 +180,11 @@ int wmain(int argc, wchar_t **argv) {
             throw std::runtime_error("Field copy has no non-primary member to remove");
         auto removedId = member->app.id;
         auto removedUsed = member->used;
-        storage.unmergeApp(primaryId, removedId);
+        storage.unmergeApp(primaryId, removedId,
+                           applicationNameKey(member->app.name) ==
+                                   applicationNameKey(primary->app.name)
+                               ? L"独立来源"
+                               : std::wstring{});
         auto separated = storage.snapshot(day, true, primaryId);
         bool separatedCorrect =
             separated.selectedTotal == promoted.selectedTotal - removedUsed &&
@@ -194,7 +209,8 @@ int wmain(int argc, wchar_t **argv) {
                << ",\n  \"all_group_totals_correct\": " << (totalsCorrect ? "true" : "false")
                << ",\n  \"target_identity_preserved\": " << (namePreserved ? "true" : "false")
                << ",\n  \"repeat_is_noop\": " << (repeated ? "true" : "false")
-               << ",\n  \"primary_keeps_usage_and_name\": " << (primaryPreserved ? "true" : "false")
+               << ",\n  \"primary_uses_source_name_and_icon\": "
+               << (primaryPreserved ? "true" : "false")
                << ",\n  \"separation_restores_member_usage\": "
                << (separatedCorrect ? "true" : "false")
                << ",\n  \"remerge_preserves_totals\": " << (restored ? "true" : "false")

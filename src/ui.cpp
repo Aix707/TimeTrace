@@ -353,6 +353,8 @@ void Ui::promptReminder(const std::string &app, bool device, bool chooseApp) {
         p.minutes = static_cast<int>(view->rule.threshold / 60000);
     if (device)
         p.appName = L"休息提醒";
+    else if (view)
+        p.appName = view->name;
     else
         for (const auto &candidate : snapshot_.catalog)
             if (candidate.id == app)
@@ -362,8 +364,7 @@ void Ui::promptReminder(const std::string &app, bool device, bool chooseApp) {
             if (candidate.id != "app:unidentified" && !reminder(candidate.id))
                 p.choices.push_back(candidate);
         if (p.choices.empty()) {
-            MessageBoxW(window_, L"所有应用均已添加提醒，可直接修改时长。", L"应用提醒",
-                        MB_ICONINFORMATION);
+            MessageBoxW(window_, L"暂无可添加的应用。", L"应用提醒", MB_ICONINFORMATION);
             return;
         }
     }
@@ -410,9 +411,27 @@ void Ui::promptApp(const std::string &app, bool merge) {
     command.app = merge ? std::string{} : app;
     command.mergeApps = std::move(p.targets);
     command.name = p.text;
+    if (!merge && !confirmName(app, p.text, command.confirmed))
+        return;
     command.target = merge ? app : std::string{};
     service_->send(std::move(command));
     request();
+}
+bool Ui::confirmName(const std::string &app, const std::wstring &name, bool &confirmed) {
+    for (const auto &other : snapshot_.catalog) {
+        if (other.id == app || applicationNameKey(other.name) != applicationNameKey(name))
+            continue;
+        auto total = snapshot_.selectedTotal;
+        for (const auto &row : snapshot_.apps)
+            if (row.app.id == other.id)
+                total += row.used;
+        auto message = L"已有“" + other.name + L"”。合并后所选时段用时为 " + formatDuration(total) +
+                       L"。\n合并这两个应用？";
+        confirmed = MessageBoxW(window_, message.c_str(), L"合并同名应用",
+                                MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES;
+        return confirmed;
+    }
+    return true;
 }
 void Ui::promptMembers(const std::string &app) {
     if (snapshot_.members.empty() || snapshot_.selected.app.id != app)
@@ -429,8 +448,41 @@ void Ui::promptMembers(const std::string &app) {
     command.kind = p.result == 107 ? Command::Unmerge : Command::SetPrimary;
     command.app = app;
     command.target = p.target;
-    if (command.kind == Command::SetPrimary)
+    if (command.kind == Command::SetPrimary) {
+        auto member = std::find_if(p.members.begin(), p.members.end(),
+                                   [&](const auto &row) { return row.app.id == p.target; });
+        if (member == p.members.end() || !confirmName(app, member->app.name, command.confirmed))
+            return;
         selected_ = p.target;
+    } else {
+        Prompt move;
+        move.kind = Prompt::MoveMember;
+        for (const auto &member : p.members)
+            if (member.app.id == p.target)
+                move.appName = member.app.name;
+        move.choices.push_back({{}, L"独立为应用", {}});
+        for (const auto &candidate : snapshot_.catalog)
+            if (candidate.id != app)
+                move.choices.push_back(candidate);
+        for (;;) {
+            if (!showPrompt(window_, move))
+                return;
+            if (!move.target.empty())
+                break;
+            bool exists = std::any_of(
+                snapshot_.catalog.begin(), snapshot_.catalog.end(), [&](const auto &candidate) {
+                    return applicationNameKey(candidate.name) == applicationNameKey(move.text);
+                });
+            if (!exists)
+                break;
+            MessageBoxW(window_, L"此名称已有应用。请选择该应用，或为独立应用填写其他名称。",
+                        L"更改归属", MB_OK | MB_ICONINFORMATION);
+            move.appName = move.text;
+        }
+        command.destination = move.target;
+        if (move.target.empty())
+            command.name = move.text;
+    }
     service_->send(std::move(command));
     request();
 }

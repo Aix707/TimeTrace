@@ -22,12 +22,21 @@ with sqlite3.connect(copy) as db:
     unchanged={t:before[t]==after[t] for t in before}
     # Migration may add an unidentified representative, retaining every raw source.
     unchanged['apps']=all(row in after['apps'] for row in before['apps'])
-    unchanged['app_links']=all(row in after['app_links'] for row in before['app_links'])
+    links = dict(after['app_links'])
+    def root(app):
+        return links.get(app, app)
+    unchanged['app_links'] = all(root(app) == root(target) for app, target in before['app_links'])
+    if version >= 3:
+        actual_rules = {row[0]: row for row in after['reminder_rules']}
+        unchanged['reminder_rules'] = all(
+            rid in actual_rules and actual_rules[rid] == (rid, kind, root(app) if app else app, duration, enabled)
+            for rid, kind, app, duration, enabled in before['reminder_rules'])
     totals_equal=total==db.execute('select coalesce(sum(duration),0) from segments').fetchone()[0]
     rules=db.execute('select app,duration from reminder_rules where kind=1').fetchall()
     legacy_ok=version>=3 or all((app,duration) in rules for app,duration in thresholds)
     device=db.execute('select duration,enabled from reminder_rules where kind=0').fetchone()
 result={'source_opened_read_only':True,'source_schema':version,'target_schema':schema,'applications':len(before['apps']),'intervals':len(before['segments']),'recorded_milliseconds':total,'unchanged_tables':unchanged,'segments_sha256_before':digest(before['segments']),'segments_sha256_after':digest(after['segments']),'total_unchanged':totals_equal,'legacy_thresholds_preserved':legacy_ok,'new_device_disabled_sixty_minutes':device==(3600000,0)}
-result['passed']=schema==6 and all(unchanged.values()) and totals_equal and legacy_ok and (version>=3 or result['new_device_disabled_sixty_minutes'])
+result['binary_sha256']=hashlib.sha256(a.exe.read_bytes()).hexdigest()
+result['passed']=schema==7 and all(unchanged.values()) and totals_equal and legacy_ok and (version>=3 or result['new_device_disabled_sixty_minutes'])
 (folder/'result.json').write_text(json.dumps(result,indent=2),encoding='utf-8');print(json.dumps(result,indent=2))
 raise SystemExit(0 if result['passed'] else 1)

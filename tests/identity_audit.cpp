@@ -60,11 +60,11 @@ int wmain(int argc, wchar_t **argv) {
             throw std::runtime_error("Unknown audit argument");
         if (apply && input.wstring().find(L"\\test-output\\") == std::wstring::npos)
             throw std::runtime_error("--apply requires a database copy under test-output");
-        auto apps = readApps(input);
         AppResolver resolver;
         std::unique_ptr<Storage> storage;
         if (apply)
             storage = std::make_unique<Storage>(input);
+        auto apps = storage ? storage->identitySources() : readApps(input);
         std::ofstream output(argv[2], std::ios::binary);
         if (!output)
             throw std::runtime_error("Cannot write audit output");
@@ -73,12 +73,14 @@ int wmain(int argc, wchar_t **argv) {
         for (size_t i = 0; i < apps.size(); ++i) {
             auto match = resolver.identify(apps[i]);
             identified += !match.representative.id.empty();
-            auto canonical =
-                storage ? storage->registerApp(match.source, match.representative) : std::string{};
+            auto canonical = storage && !apps[i].id.starts_with("app:")
+                                 ? storage->registerApp(match.source, match.representative)
+                                 : std::string{};
             output << (i ? ",\n" : "") << "{\"source\":" << json(apps[i].id)
                    << ",\"name\":" << json(utf8(apps[i].name))
                    << ",\"representative\":" << json(match.representative.id)
                    << ",\"display_name\":" << json(utf8(match.representative.name))
+                   << ",\"application_name\":" << json(utf8(match.source.applicationName))
                    << ",\"evidence\":" << json(match.evidence)
                    << ",\"canonical\":" << json(canonical) << '}';
         }

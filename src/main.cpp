@@ -315,10 +315,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             engine.load(db.reminderRules(), db.reminderStates(today), db.dailyUsage(today), today,
                         true);
             s.reminders = engine.views();
-            for (auto &view : s.reminders)
+            for (auto &view : s.reminders) {
                 for (const auto &app : s.catalog)
                     if (app.id == view.rule.app)
                         view.name = app.name;
+                if (view.name.empty() && view.rule.kind == tt::ReminderKind::App)
+                    view.name = db.displayName(view.rule.app);
+            }
             for (auto &row : s.apps)
                 row.icon = tt::loadAppIcon(row.app.path);
             if (!s.selected.app.id.empty())

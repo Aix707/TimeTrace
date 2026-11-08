@@ -1,0 +1,14 @@
+{
+  "pid": 4168,
+  "measured_seconds": 180.518055,
+  "warmup_seconds": 120,
+  "samples": 179,
+  "average_cpu_percent": 0.001298,
+  "peak_private_working_set_bytes": 3952640.000000,
+  "peak_private_commit_bytes": 4747264.000000,
+  "private_working_set_growth_bytes": -40960.000000,
+  "process_exited_early": false,
+  "ui_opened_during_measurement": false,
+  "clock": "unbiased_interrupt_time",
+  "passed_resource_budget": true
+}

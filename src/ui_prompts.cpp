@@ -3,7 +3,6 @@
 #include <commctrl.h>
 #include <algorithm>
 #include <cwctype>
-#include <filesystem>
 
 namespace tt::ui {
 namespace {
@@ -21,6 +20,28 @@ int selectedMember(Prompt &p) {
         static_cast<size_t>(item.lParam) >= p.members.size())
         return -1;
     return static_cast<int>(item.lParam);
+}
+template <typename Row>
+void listImages(Prompt &prompt, const std::vector<Row> &rows, int height, UINT dpi) {
+    int icon = MulDiv(metrics::icon, dpi, 96), row = MulDiv(height, dpi, 96) - 2;
+    prompt.images =
+        ImageList_Create(icon, row, ILC_COLOR24 | ILC_MASK, static_cast<int>(rows.size()), 1);
+    auto screen = GetDC(nullptr);
+    auto dc = CreateCompatibleDC(screen);
+    auto bitmap = CreateCompatibleBitmap(screen, icon, row);
+    ReleaseDC(nullptr, screen);
+    auto previous = SelectObject(dc, bitmap);
+    for (const auto &entry : rows) {
+        PatBlt(dc, 0, 0, icon, row, WHITENESS);
+        auto handle =
+            entry.icon ? static_cast<HICON>(entry.icon.get()) : LoadIconW(nullptr, IDI_APPLICATION);
+        DrawIconEx(dc, 0, (row - icon) / 2, handle, icon, icon, 0, nullptr, DI_NORMAL);
+        ImageList_AddMasked(prompt.images, bitmap, RGB(255, 255, 255));
+    }
+    SelectObject(dc, previous);
+    DeleteObject(bitmap);
+    DeleteDC(dc);
+    ListView_SetImageList(prompt.list, prompt.images, LVSIL_SMALL);
 }
 void updateMergeSelection(HWND dialog, Prompt &p) {
     auto selected = std::count(p.checked.begin(), p.checked.end(), true);
@@ -53,20 +74,21 @@ void populateMergeList(HWND dialog, Prompt &p) {
     ListView_DeleteAllItems(p.list);
     for (size_t i = 0; i < p.mergeCandidates.size(); ++i) {
         const auto &candidate = p.mergeCandidates[i];
-        auto searchable = candidate.app.name + L" " + candidate.app.path;
+        auto searchable = candidate.app.name;
         if (candidate.related)
             searchable += L" " + p.appName;
         if (folded(std::move(searchable)).find(query) == std::wstring::npos)
             continue;
         LVITEMW item{};
-        item.mask = LVIF_TEXT | LVIF_PARAM | LVIF_GROUPID;
+        item.mask = LVIF_TEXT | LVIF_PARAM | LVIF_GROUPID | LVIF_IMAGE;
+        item.iImage = static_cast<int>(i);
         item.iItem = ListView_GetItemCount(p.list);
         item.pszText = const_cast<wchar_t *>(candidate.app.name.c_str());
         item.lParam = static_cast<LPARAM>(i);
         item.iGroupId = candidate.related ? 0 : 1;
         auto row = ListView_InsertItem(p.list, &item);
-        auto path = candidate.app.path.empty() ? L"来源路径不可用" : candidate.app.path.c_str();
-        ListView_SetItemText(p.list, row, 1, const_cast<wchar_t *>(path));
+        auto duration = formatDuration(candidate.used);
+        ListView_SetItemText(p.list, row, 1, duration.data());
         ListView_SetCheckState(p.list, row, p.checked[i]);
     }
     SendMessageW(p.list, WM_SETREDRAW, TRUE, 0);
@@ -99,7 +121,7 @@ LRESULT CALLBACK promptProc(HWND h, UINT message, WPARAM w, LPARAM l) {
         if (p->kind == Prompt::GroupMembers) {
             INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_LISTVIEW_CLASSES};
             InitCommonControlsEx(&controls);
-            auto title = L"合并成员 · " + p->appName;
+            auto title = L"应用来源 · " + p->appName;
             control(L"STATIC", title.c_str(), SS_ENDELLIPSIS | SS_NOPREFIX, 24, 18, 388, 26);
             auto total = L"合计 " + formatDuration(p->baseUsed);
             control(L"STATIC", total.c_str(), SS_RIGHT, 424, 18, 192, 26);
@@ -112,7 +134,7 @@ LRESULT CALLBACK promptProc(HWND h, UINT message, WPARAM w, LPARAM l) {
                                                            LVS_EX_LABELTIP);
             LVCOLUMNW column{};
             column.mask = LVCF_WIDTH | LVCF_TEXT;
-            const wchar_t *labels[]{L"应用／程序", L"所选时段用时", L"来源路径"};
+            const wchar_t *labels[]{L"来源名称", L"所选时段用时", L"程序路径"};
             const int widths[]{180, 120, 262};
             for (int i = 0; i < 3; ++i) {
                 column.cx = s(widths[i]);
@@ -120,10 +142,12 @@ LRESULT CALLBACK promptProc(HWND h, UINT message, WPARAM w, LPARAM l) {
                 ListView_InsertColumn(p->list, i, &column);
             }
             p->updatingList = true;
+            listImages(*p, p->members, metrics::preferenceRow, dpi);
             for (size_t i = 0; i < p->members.size(); ++i) {
                 auto name = p->members[i].app.name + (i == 0 ? L" · 主应用" : L"");
                 LVITEMW item{};
-                item.mask = LVIF_TEXT | LVIF_PARAM;
+                item.mask = LVIF_TEXT | LVIF_PARAM | LVIF_IMAGE;
+                item.iImage = static_cast<int>(i);
                 item.iItem = static_cast<int>(i);
                 item.pszText = name.data();
                 item.lParam = static_cast<LPARAM>(i);
@@ -134,7 +158,7 @@ LRESULT CALLBACK promptProc(HWND h, UINT message, WPARAM w, LPARAM l) {
             }
             p->detail =
                 control(L"STATIC", L"", SS_EDITCONTROL | SS_NOPREFIX, 24, 330, 592, 42, 105);
-            auto remove = control(L"BUTTON", L"移出", WS_TABSTOP, 24, 384, metrics::actionWidth,
+            auto remove = control(L"BUTTON", L"更改归属", WS_TABSTOP, 24, 384, metrics::actionWidth,
                                   metrics::control, 107);
             auto primary = control(L"BUTTON", L"设为主应用", WS_TABSTOP, 156, 384,
                                    metrics::valueWidth, metrics::control, 108);
@@ -153,15 +177,13 @@ LRESULT CALLBACK promptProc(HWND h, UINT message, WPARAM w, LPARAM l) {
             InitCommonControlsEx(&controls);
             auto title = L"并入 " + p->appName;
             control(L"STATIC", title.c_str(), SS_ENDELLIPSIS | SS_NOPREFIX, 24, 18, 592, 26);
-            control(L"STATIC", p->appPath.c_str(), SS_PATHELLIPSIS | SS_NOPREFIX, 24, 46, 592, 26,
-                    106);
+            control(L"STATIC", L"选择要并入的应用", SS_NOPREFIX, 24, 46, 592, 26, 106);
             p->edit = control(L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, 24, 82, 592,
                               metrics::control, 102, WS_EX_CLIENTEDGE);
-            SendMessageW(p->edit, EM_SETCUEBANNER, TRUE,
-                         reinterpret_cast<LPARAM>(L"搜索应用名称或程序路径"));
+            SendMessageW(p->edit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"搜索应用名称"));
             SendMessageW(p->edit, EM_SETLIMITTEXT, 256, 0);
-            p->related = control(L"BUTTON", L"全选同目录记录", WS_TABSTOP | BS_AUTOCHECKBOX, 24,
-                                 132, 244, 28, 103);
+            p->related = control(L"BUTTON", L"全选相关应用", WS_TABSTOP | BS_AUTOCHECKBOX, 24, 132,
+                                 244, 28, 103);
             p->count = control(L"STATIC", L"", SS_RIGHT, 284, 126, 332, 46, 104);
             p->list = control(WC_LISTVIEWW, L"",
                               WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 24, 180,
@@ -170,20 +192,20 @@ LRESULT CALLBACK promptProc(HWND h, UINT message, WPARAM w, LPARAM l) {
                                                            LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP);
             LVCOLUMNW column{};
             column.mask = LVCF_WIDTH | LVCF_TEXT;
-            column.cx = s(180);
-            column.pszText = const_cast<wchar_t *>(L"应用／程序");
-            ListView_InsertColumn(p->list, 0, &column);
             column.cx = s(382);
-            column.pszText = const_cast<wchar_t *>(L"来源路径");
+            column.pszText = const_cast<wchar_t *>(L"应用");
+            ListView_InsertColumn(p->list, 0, &column);
+            column.cx = s(180);
+            column.pszText = const_cast<wchar_t *>(L"所选时段用时");
             ListView_InsertColumn(p->list, 1, &column);
-            auto relatedHeader = p->appName + L" · 同目录记录";
+            auto relatedHeader = p->appName + L" · 相关应用";
             LVGROUP group{sizeof(group)};
             group.mask = LVGF_HEADER | LVGF_GROUPID;
             group.iGroupId = 0;
             group.pszHeader = relatedHeader.data();
             ListView_InsertGroup(p->list, -1, &group);
             group.iGroupId = 1;
-            group.pszHeader = const_cast<wchar_t *>(L"其他记录");
+            group.pszHeader = const_cast<wchar_t *>(L"其他应用");
             ListView_InsertGroup(p->list, -1, &group);
             ListView_EnableGroupView(p->list, TRUE);
             p->detail =
@@ -193,24 +215,21 @@ LRESULT CALLBACK promptProc(HWND h, UINT message, WPARAM w, LPARAM l) {
             control(L"BUTTON", L"取消", WS_TABSTOP, 496, 460, metrics::actionWidth,
                     metrics::control, IDCANCEL);
             p->checked.assign(p->mergeCandidates.size(), false);
+            listImages(*p, p->mergeCandidates, metrics::row, dpi);
             populateMergeList(h, *p);
             return 0;
         }
-        control(L"STATIC", p->kind == Prompt::AddReminder ? L"选择应用" : p->appName.c_str(),
+        control(L"STATIC",
+                (p->kind == Prompt::AddReminder || p->kind == Prompt::MoveMember)
+                    ? L"选择应用"
+                    : p->appName.c_str(),
                 SS_ENDELLIPSIS, 24, 18, 332, 26);
-        const bool choice = p->kind == Prompt::AddReminder;
+        const bool choice = p->kind == Prompt::AddReminder || p->kind == Prompt::MoveMember;
         if (choice) {
             p->combo = control(L"COMBOBOX", L"", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, 24, 50,
                                332, 240, 101);
             for (const auto &app : p->choices) {
                 auto label = app.name;
-                if (std::count_if(p->choices.begin(), p->choices.end(),
-                                  [&](const auto &a) { return a.name == app.name; }) > 1 &&
-                    !app.path.empty()) {
-                    auto path = std::filesystem::path(app.path);
-                    label += L" · " + path.parent_path().filename().wstring() + L" / " +
-                             path.filename().wstring();
-                }
                 SendMessageW(p->combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
             }
             SendMessageW(p->combo, CB_SETMINVISIBLE, 8, 0);
@@ -220,24 +239,27 @@ LRESULT CALLBACK promptProc(HWND h, UINT message, WPARAM w, LPARAM l) {
             SendMessageW(p->combo, CB_SETITEMHEIGHT, 0, s(metrics::body + 12));
         }
         {
-            auto caption = p->kind == Prompt::Rename ? L"名称（最多 40 字）"
-                           : p->device               ? L"连续时长（分钟）"
-                                                     : L"每日时长（分钟）";
-            int top = p->kind == Prompt::AddReminder ? 94 : 54;
+            auto caption = (p->kind == Prompt::Rename || p->kind == Prompt::MoveMember)
+                               ? L"应用名称"
+                           : p->device ? L"连续时长（分钟）"
+                                       : L"每日时长（分钟）";
+            int top = choice ? 94 : 54;
             control(L"STATIC", caption, 0, 24, top, 332, 26);
-            auto initial = p->kind == Prompt::Rename ? p->appName : std::to_wstring(p->minutes);
-            p->edit =
-                control(L"EDIT", initial.c_str(),
-                        WS_TABSTOP | ES_AUTOHSCROLL | (p->kind == Prompt::Rename ? 0 : ES_NUMBER),
-                        24, top + 33, 332, metrics::control, 100, WS_EX_CLIENTEDGE);
-            SendMessageW(p->edit, EM_SETLIMITTEXT, p->kind == Prompt::Rename ? 40 : 4, 0);
+            bool naming = p->kind == Prompt::Rename || p->kind == Prompt::MoveMember;
+            auto initial = naming ? p->appName : std::to_wstring(p->minutes);
+            p->edit = control(L"EDIT", initial.c_str(),
+                              WS_TABSTOP | ES_AUTOHSCROLL | (naming ? 0 : ES_NUMBER), 24, top + 33,
+                              332, metrics::control, 100, WS_EX_CLIENTEDGE);
+            SendMessageW(p->edit, EM_SETLIMITTEXT, naming ? 40 : 4, 0);
         }
         int buttons = choice ? 194 : 150;
         auto ok = control(L"BUTTON", L"保存", WS_TABSTOP | BS_DEFPUSHBUTTON, 104, buttons,
                           metrics::actionWidth, metrics::control, IDOK);
         control(L"BUTTON", L"取消", WS_TABSTOP, 236, buttons, metrics::actionWidth,
                 metrics::control, IDCANCEL);
-        if (choice)
+        if (p->kind == Prompt::MoveMember) {
+            SendMessageW(p->combo, CB_SETCURSEL, 0, 0);
+        } else if (choice)
             EnableWindow(ok, FALSE);
         else
             SendMessageW(p->edit, EM_SETSEL, 0, -1);
@@ -258,13 +280,6 @@ LRESULT CALLBACK promptProc(HWND h, UINT message, WPARAM w, LPARAM l) {
             auto member = selectedMember(*p);
             if (member <= 0)
                 return 0;
-            if (LOWORD(w) == 107) {
-                auto question = L"移出“" + p->members[member].app.name +
-                                L"”？\n该成员将恢复独立统计，历史用时保留。";
-                if (MessageBoxW(h, question.c_str(), L"移出合并成员",
-                                MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES)
-                    return 0;
-            }
             p->target = p->members[member].app.id;
             p->result = LOWORD(w);
             p->accepted = true;
@@ -282,6 +297,10 @@ LRESULT CALLBACK promptProc(HWND h, UINT message, WPARAM w, LPARAM l) {
                     p->checked[i] = checked;
             populateMergeList(h, *p);
             return 0;
+        }
+        if (p->kind == Prompt::MoveMember && HIWORD(w) == CBN_SELCHANGE) {
+            auto index = SendMessageW(p->combo, CB_GETCURSEL, 0, 0);
+            EnableWindow(p->edit, index == 0);
         }
         if (HIWORD(w) == CBN_SELCHANGE && (LOWORD(w) == 100 || LOWORD(w) == 101)) {
             EnableWindow(GetDlgItem(h, IDOK), SendMessageW(p->combo, CB_GETCURSEL, 0, 0) != CB_ERR);
@@ -309,7 +328,7 @@ LRESULT CALLBACK promptProc(HWND h, UINT message, WPARAM w, LPARAM l) {
             if (p->kind != Prompt::Merge) {
                 wchar_t value[80]{};
                 GetWindowTextW(p->edit, value, 80);
-                if (p->kind == Prompt::Rename) {
+                if (p->kind == Prompt::Rename || p->kind == Prompt::MoveMember) {
                     p->text = value;
                     if (p->text.empty() || std::all_of(p->text.begin(), p->text.end(),
                                                        [](wchar_t c) { return iswspace(c); })) {
@@ -364,7 +383,7 @@ LRESULT CALLBACK promptProc(HWND h, UINT message, WPARAM w, LPARAM l) {
             if (change->uNewState & LVIS_SELECTED)
                 SetWindowTextW(
                     p->detail,
-                    p->mergeCandidates[static_cast<size_t>(item.lParam)].app.path.c_str());
+                    p->mergeCandidates[static_cast<size_t>(item.lParam)].app.name.c_str());
             return 0;
         }
     }
@@ -376,6 +395,9 @@ LRESULT CALLBACK promptProc(HWND h, UINT message, WPARAM w, LPARAM l) {
 }
 } // namespace
 bool showPrompt(HWND owner, Prompt &p) {
+    p.accepted = false;
+    p.target.clear();
+    p.edit = p.combo = p.list = nullptr;
     WNDCLASSW wc{};
     wc.lpfnWndProc = promptProc;
     wc.hInstance = GetModuleHandleW(nullptr);
@@ -383,6 +405,7 @@ bool showPrompt(HWND owner, Prompt &p) {
                        : p.kind == Prompt::Rename       ? L"TimeTrace.Rename"
                        : p.kind == Prompt::Merge        ? L"TimeTrace.Merge"
                        : p.kind == Prompt::GroupMembers ? L"TimeTrace.GroupMembers"
+                       : p.kind == Prompt::MoveMember   ? L"TimeTrace.MoveMember"
                                                         : L"TimeTrace.AddReminder";
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
@@ -390,7 +413,7 @@ bool showPrompt(HWND owner, Prompt &p) {
     RECT r{};
     GetWindowRect(owner, &r);
     auto dpi = GetDpiForWindow(owner);
-    bool tall = p.kind == Prompt::AddReminder;
+    bool tall = p.kind == Prompt::AddReminder || p.kind == Prompt::MoveMember;
     int width = MulDiv(396, dpi, 96), height = MulDiv(tall ? 286 : 242, dpi, 96);
     if (p.kind == Prompt::Merge || p.kind == Prompt::GroupMembers) {
         RECT client{0, 0, MulDiv(640, dpi, 96),
@@ -402,7 +425,8 @@ bool showPrompt(HWND owner, Prompt &p) {
     const wchar_t *title = p.kind == Prompt::Reminder       ? (p.device ? L"休息提醒" : L"应用提醒")
                            : p.kind == Prompt::Rename       ? L"重命名"
                            : p.kind == Prompt::Merge        ? L"合并记录"
-                           : p.kind == Prompt::GroupMembers ? L"合并成员"
+                           : p.kind == Prompt::GroupMembers ? L"应用来源"
+                           : p.kind == Prompt::MoveMember   ? L"更改归属"
                                                             : L"添加应用提醒";
     auto dialog =
         CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, title, WS_CAPTION | WS_SYSMENU,
@@ -431,6 +455,10 @@ bool showPrompt(HWND owner, Prompt &p) {
     SetForegroundWindow(owner);
     if (p.font)
         DeleteObject(p.font);
+    if (p.images) {
+        ImageList_Destroy(p.images);
+        p.images = nullptr;
+    }
     return p.accepted;
 }
 } // namespace tt::ui

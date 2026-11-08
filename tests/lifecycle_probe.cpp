@@ -185,6 +185,8 @@ int wmain(int argc, wchar_t **argv) {
             continue;
         }
         Sleep(300);
+        if (i == 0)
+            Sleep(2500);
         RECT client{};
         GetClientRect(window, &client);
         auto dpi = GetDpiForWindow(window);
@@ -274,17 +276,15 @@ int wmain(int argc, wchar_t **argv) {
                 GetWindowTextW(FindWindowExW(dialog, nullptr, L"STATIC", nullptr), label, 512);
                 mergeTargetPassed = wcscmp(label, L"并入 演示应用") == 0;
                 GetWindowTextW(GetDlgItem(dialog, 106), label, 512);
-                mergeTargetPassed =
-                    mergeTargetPassed && wcscmp(label, L"C:\\Apps\\Chrome\\chrome.exe") == 0;
+                mergeTargetPassed = mergeTargetPassed && wcscmp(label, L"选择要并入的应用") == 0;
                 bool initiallyEmpty = !IsWindowEnabled(GetDlgItem(dialog, IDOK));
                 SendMessageW(search, WM_SETTEXT, 0,
                              reinterpret_cast<LPARAM>(L"Visual Studio Code"));
                 auto code = listRow(app.hProcess, list, L"Visual Studio Code");
-                bool codeSelected =
-                    code >= 0 && ListView_GetItemCount(list) == 1 &&
-                    listText(app.hProcess, list, code, 1) == L"C:\\Apps\\Code.exe" &&
-                    checkListRow(app.hProcess, list, code);
-                SendMessageW(search, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(L"chrome-helper.exe"));
+                bool codeSelected = code >= 0 && ListView_GetItemCount(list) == 1 &&
+                                    listText(app.hProcess, list, code, 1) == L"50分钟" &&
+                                    checkListRow(app.hProcess, list, code);
+                SendMessageW(search, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(L"Chrome Helper"));
                 auto helper = listRow(app.hProcess, list, L"Chrome Helper");
                 bool helperSelected = helper >= 0 && ListView_GetItemCount(list) == 1 &&
                                       checkListRow(app.hProcess, list, helper);
@@ -360,24 +360,33 @@ int wmain(int argc, wchar_t **argv) {
                         if (setListState(app.hProcess, list, chrome, LVIS_SELECTED | LVIS_FOCUSED,
                                          LVIS_SELECTED | LVIS_FOCUSED)) {
                             PostMessageW(dialog, WM_COMMAND, 107, 0);
-                            auto confirmation = waitWindow(app.dwProcessId, L"#32770");
-                            if (confirmation) {
-                                finishDialog(confirmation, IDNO);
-                                memberMoveCancelPassed =
-                                    IsWindow(dialog) && ListView_GetItemCount(list) == 4;
-                                PostMessageW(dialog, WM_COMMAND, 107, 0);
-                                confirmation = waitWindow(app.dwProcessId, L"#32770");
-                                if (confirmation) {
-                                    finishDialog(confirmation, IDYES);
-                                    Sleep(300);
-                                    dialog = openMembers();
-                                    if (dialog) {
-                                        list = GetDlgItem(dialog, 100);
-                                        memberMovePassed =
-                                            ListView_GetItemCount(list) == 3 &&
-                                            listRow(app.hProcess, list,
-                                                    L"C:\\Apps\\Chrome\\chrome.exe", 2) < 0;
-                                        capture(dialog, output + L".members-moved.bmp");
+                            auto move = waitWindow(app.dwProcessId, L"TimeTrace.MoveMember");
+                            if (move) {
+                                capture(move, output + L".move-dialog.bmp");
+                                finishDialog(move, IDCANCEL);
+                                dialog = openMembers();
+                                if (dialog) {
+                                    list = GetDlgItem(dialog, 100);
+                                    memberMoveCancelPassed = ListView_GetItemCount(list) == 4;
+                                    chrome = listRow(app.hProcess, list,
+                                                     L"C:\\Apps\\Chrome\\chrome.exe", 2);
+                                    setListState(app.hProcess, list, chrome,
+                                                 LVIS_SELECTED | LVIS_FOCUSED,
+                                                 LVIS_SELECTED | LVIS_FOCUSED);
+                                    PostMessageW(dialog, WM_COMMAND, 107, 0);
+                                    move = waitWindow(app.dwProcessId, L"TimeTrace.MoveMember");
+                                    if (move) {
+                                        finishDialog(move, IDOK);
+                                        Sleep(300);
+                                        dialog = openMembers();
+                                        if (dialog) {
+                                            list = GetDlgItem(dialog, 100);
+                                            memberMovePassed =
+                                                ListView_GetItemCount(list) == 3 &&
+                                                listRow(app.hProcess, list,
+                                                        L"C:\\Apps\\Chrome\\chrome.exe", 2) < 0;
+                                            capture(dialog, output + L".members-moved.bmp");
+                                        }
                                     }
                                 }
                             }
@@ -392,9 +401,8 @@ int wmain(int argc, wchar_t **argv) {
                 dialog = waitWindow(app.dwProcessId, L"TimeTrace.Merge");
                 if (dialog) {
                     auto search = GetDlgItem(dialog, 102), list = GetDlgItem(dialog, 100);
-                    SendMessageW(search, WM_SETTEXT, 0,
-                                 reinterpret_cast<LPARAM>(L"C:\\Apps\\Chrome\\chrome.exe"));
-                    auto chrome = listRow(app.hProcess, list, L"C:\\Apps\\Chrome\\chrome.exe", 1);
+                    SendMessageW(search, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(L"演示应用"));
+                    auto chrome = listRow(app.hProcess, list, L"演示应用");
                     if (checkListRow(app.hProcess, list, chrome)) {
                         finishDialog(dialog, IDOK);
                         Sleep(300);
@@ -429,6 +437,9 @@ int wmain(int argc, wchar_t **argv) {
                 auto combo = GetDlgItem(dialog, 101);
                 auto item = SendMessageW(combo, CB_FINDSTRINGEXACT, static_cast<WPARAM>(-1),
                                          reinterpret_cast<LPARAM>(L"文件资源管理器"));
+                if (item == CB_ERR)
+                    item = SendMessageW(combo, CB_FINDSTRINGEXACT, static_cast<WPARAM>(-1),
+                                        reinterpret_cast<LPARAM>(L"Windows 资源管理器"));
                 if (item != CB_ERR) {
                     SendMessageW(combo, CB_SETCURSEL, item, 0);
                     SendMessageW(dialog, WM_COMMAND, MAKEWPARAM(101, CBN_SELCHANGE),
@@ -477,7 +488,7 @@ int wmain(int argc, wchar_t **argv) {
             if (dialog) {
                 wchar_t label[100]{};
                 GetWindowTextW(FindWindowExW(dialog, nullptr, L"STATIC", nullptr), label, 100);
-                reminderScrollPassed = wcscmp(label, L"文件资源管理器") == 0;
+                reminderScrollPassed = wcsstr(label, L"资源管理器") != nullptr;
                 finishDialog(dialog, IDCANCEL);
             }
         }
@@ -541,7 +552,7 @@ int wmain(int argc, wchar_t **argv) {
                 "WITH roots AS (SELECT COALESCE((SELECT target FROM app_links WHERE "
                 "app='chrome'),'chrome') chrome,COALESCE((SELECT target FROM app_links "
                 "WHERE app='explorer'),'explorer') explorer) "
-                "SELECT (SELECT name FROM app_labels WHERE app=roots.chrome)='演示应用',"
+                "SELECT (SELECT name FROM app_labels WHERE app='chrome')='演示应用',"
                 "COALESCE((SELECT target FROM app_links WHERE app='code'),'code')=roots.chrome AND "
                 "(SELECT target FROM app_links WHERE app='chrome-helper')=roots.chrome AND "
                 "(SELECT target FROM app_links WHERE app='chrome-old')=roots.chrome,"

@@ -1,6 +1,7 @@
 #include "core.h"
 #include <algorithm>
 #include <cstdio>
+#include <cwctype>
 #include <stdexcept>
 #include <windows.h>
 
@@ -128,6 +129,22 @@ std::wstring formatDuration(Millis ms) {
     if (minutes)
         return std::to_wstring(minutes) + L"分钟";
     return std::to_wstring(seconds) + L"秒";
+}
+std::string applicationNameKey(const std::wstring &name) {
+    auto first = std::find_if_not(name.begin(), name.end(), iswspace);
+    auto last = std::find_if_not(name.rbegin(), name.rend(), iswspace).base();
+    if (first >= last)
+        return {};
+    std::wstring value(first, last);
+    int length = LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, value.data(),
+                               static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr, 0);
+    if (length > 0) {
+        std::wstring lower(length, 0);
+        LCMapStringEx(LOCALE_NAME_INVARIANT, LCMAP_LOWERCASE, value.data(),
+                      static_cast<int>(value.size()), lower.data(), length, nullptr, nullptr, 0);
+        value = std::move(lower);
+    }
+    return utf8(value);
 }
 std::string utf8(const std::wstring &v) {
     if (v.empty())
