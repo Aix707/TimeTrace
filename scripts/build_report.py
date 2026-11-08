@@ -34,7 +34,7 @@ binary = fingerprint(EXE)
 lines = [
     f"# TimeTrace {VERSION} 测试报告", "",
     f"生成于 {datetime.now().astimezone().isoformat(timespec='seconds')}", "",
-    "本版按应用名自动汇总，名称与图标跟随主来源。各来源独立保留名称，来源可更改归属或独立为应用，同名合并先确认合计用时。使用原生界面、现有工作线程、一秒心跳与五秒批量保存。", "",
+    "本版将应用来源放在提醒下方，采用同宽卡片、来源数量摘要、统一的字号和组件尺寸。管理窗口使用双行来源、浅灰选择态及圆角操作。使用原生界面、现有工作线程、一秒心跳与五秒批量保存。", "",
     "## 自动回归", "",
 ]
 for suffix, label in [
@@ -60,16 +60,18 @@ if native:
         f"- 字号与控件检查{outcome(native['native_prompt_metrics'])}。正文为 16 DIP，输入框与按钮为 36 DIP。来源行采用 80 DIP，合并列表采用 64 DIP，图标为 32 DIP。",
         f"- GDI 句柄 {native['baseline_gdi_handles']} → {native['final_gdi_handles']}，USER 句柄 {native['baseline_user_handles']} → {native['final_user_handles']}。关闭窗口后的私有工作集为 {megabytes(native['private_working_set_after_cycles'])}。",
     ])
+if native and "native_source_styles" in native:
+    lines.append(f"- 来源管理原生选择、80 DIP 行高和 36 DIP 操作检查{outcome(native['native_source_styles'])}，最小窗口滚动后打开管理检查{outcome(native['native_source_minimum'])}。")
 layout = read("detail-layout.json")
 if layout:
     lines.append(f"- 默认及最小窗口的日、周视图共 {len(layout['cases'])} 种组合。概览与详情顶部统计区逐像素一致检查{outcome(layout['passed'])}。")
 
-migration = read("migration-verified-copy/result.json")
+migration = read("migration-release-copy/result.json")
 classification = read("classification-release-copy/result.json")
 field = read("merge-field.json")
 lines.extend(["", "## 实际数据副本", ""])
 if migration:
-    lines.append(f"- 只读复制真实数据库后升级 schema {migration['source_schema']} → {migration['target_schema']}。包含 {migration['applications']} 个来源和 {migration['intervals']} 条原始区间。区间、总量、自定义名称、既有归属、设置及提醒检查{outcome(migration['passed'])}。")
+    lines.append(f"- 只读复制真实数据库后核对 schema {migration['source_schema']} → {migration['target_schema']}。包含 {migration['applications']} 个来源和 {migration['intervals']} 条原始区间。区间、总量、自定义名称、既有归属、设置及提醒检查{outcome(migration['passed'])}。")
 if classification:
     lines.append(f"- 名称整理副本包含 {classification['sources']} 个来源和 {classification['intervals']} 条区间，汇总为 {classification['canonical_apps']} 个有记录的分类。原始记录、各来源自定义名称及手动归属保留，分类名称唯一且没有空分类。完整性及外键检查{outcome(classification['passed'])}。")
     for index, case in enumerate(classification["cases"], 1):
@@ -98,9 +100,10 @@ if upgrade:
 resource = read("final-background.json")
 status = read("final-background-status.json")
 if resource and status and resource["pid"] == status["ApplicationPID"] and status["SHA256"].lower() == binary:
+    cpu = '<0.01%' if resource['average_cpu_percent'] < 0.01 else f"{resource['average_cpu_percent']:.4f}%"
     lines.extend([
         f"- 最终文件预热 {resource['warmup_seconds']} 秒，托盘测量 {resource['measured_seconds']:.1f} 秒，共 {resource['samples']} 个样本。界面保持关闭检查{outcome(not resource['ui_opened_during_measurement'])}，进程持续运行检查{outcome(not resource['process_exited_early'])}。",
-        f"- 平均 CPU 为 {resource['average_cpu_percent']:.4f}%（整机总算力口径），私有工作集峰值 {megabytes(resource['peak_private_working_set_bytes'])}，测量期变化 {megabytes(resource['private_working_set_growth_bytes'])}。短测预算检查{outcome(resource['passed_resource_budget'])}。",
+        f"- 平均 CPU 为 {cpu}（整机总算力口径），私有工作集峰值 {megabytes(resource['peak_private_working_set_bytes'])}，测量期变化 {megabytes(resource['private_working_set_growth_bytes'])}。短测预算检查{outcome(resource['passed_resource_budget'])}。",
         "- 本次为托盘短测。正常使用和静置两个独立长测场景待完成。",
     ])
 else:

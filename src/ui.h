@@ -33,12 +33,15 @@ class Ui {
     std::vector<std::string> requestedIconApps_;
     size_t requestedIconCount_{};
     int page_{}, scroll_{}, focus_{-1}, hover_{-1};
+    int detailScroll_{}, detailScrollMax_{};
+    D2D1_RECT_F detailViewport_{};
     bool weekly_{}, followToday_{true};
     std::string day_, selected_, pendingMerge_;
     struct Hit {
         D2D1_RECT_F rect;
         int action;
         std::string app;
+        float contentTop{}, contentBottom{};
     };
     std::vector<Hit> hits_;
     Microsoft::WRL::ComPtr<ID2D1Factory> factory_;
@@ -59,6 +62,7 @@ class Ui {
     void drawUsage(ui::Canvas &canvas, float x, float right, float height, Millis total);
     void drawOverview(ui::Canvas &canvas, float x, float right, float height);
     void drawDetail(ui::Canvas &canvas, float x, float right, float height);
+    void scrollDetail(int delta);
     void drawPeriod(ui::Canvas &canvas, float x, float right, float top);
     void drawChart(ui::Canvas &canvas, float x, float right, float top, float bottom, Millis total);
     void appReminderRow(ui::Canvas &canvas, const ReminderView &view, float x, float right,

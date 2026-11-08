@@ -217,7 +217,10 @@ void Ui::paint() {
 }
 int Ui::hitAt(float x, float y) const {
     for (size_t i = 0; i < hits_.size(); ++i) {
-        const auto &r = hits_[i].rect;
+        const auto &hit = hits_[i];
+        const auto &r = hit.rect;
+        if (hit.contentBottom > 0 && r.bottom - r.top < hit.contentBottom - hit.contentTop - .01f)
+            continue;
         if (hits_[i].action && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom)
             return static_cast<int>(i);
     }
@@ -555,6 +558,7 @@ void Ui::act(const Hit &h) {
         selected_ = h.app;
         page_ = 3;
         scroll_ = 0;
+        detailScroll_ = 0;
         request();
     } else if (h.action == 301 || h.action == 302) {
         weekly_ = h.action == 302;
@@ -693,27 +697,16 @@ LRESULT CALLBACK Ui::proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_LBUTTONUP: {
         float scale = GetDpiForWindow(h) / 96.0f, x = GET_X_LPARAM(l) / scale,
               y = GET_Y_LPARAM(l) / scale;
-        for (const auto &hit : self->hits_)
-            if (x >= hit.rect.left && x <= hit.rect.right && y >= hit.rect.top &&
-                y <= hit.rect.bottom) {
-                auto copy = hit;
-                self->act(copy);
-                break;
-            }
+        if (auto index = self->hitAt(x, y); index >= 0) {
+            auto copy = self->hits_[index];
+            self->act(copy);
+        }
         return 0;
     }
     case WM_MOUSEMOVE: {
         float scale = GetDpiForWindow(h) / 96.0f;
         float x = GET_X_LPARAM(l) / scale, y = GET_Y_LPARAM(l) / scale;
-        int next = -1;
-        for (size_t i = 0; i < self->hits_.size(); i++) {
-            const auto &hit = self->hits_[i];
-            if (hit.action && x >= hit.rect.left && x <= hit.rect.right && y >= hit.rect.top &&
-                y <= hit.rect.bottom) {
-                next = static_cast<int>(i);
-                break;
-            }
-        }
+        int next = self->hitAt(x, y);
         if (next != self->hover_) {
             self->hover_ = next;
             InvalidateRect(h, nullptr, FALSE);
@@ -735,6 +728,11 @@ LRESULT CALLBACK Ui::proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         }
         break;
     case WM_MOUSEWHEEL: {
+        if (self->page_ == 3) {
+            self->scrollDetail(GET_WHEEL_DELTA_WPARAM(w) > 0 ? -ui::metrics::row
+                                                             : ui::metrics::row);
+            return 0;
+        }
         if (self->page_ != 0 && self->page_ != 1)
             return 0;
         int count = 0;
@@ -761,6 +759,14 @@ LRESULT CALLBACK Ui::proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     }
     case WM_KEYDOWN:
+        if (self->page_ == 3 && (w == VK_HOME || w == VK_END || w == VK_PRIOR || w == VK_NEXT)) {
+            int delta = w == VK_HOME    ? -self->detailScrollMax_
+                        : w == VK_END   ? self->detailScrollMax_
+                        : w == VK_PRIOR ? -ui::metrics::preferenceRow
+                                        : ui::metrics::preferenceRow;
+            self->scrollDetail(delta);
+            return 0;
+        }
         if (GetKeyState(VK_CONTROL) < 0 && w >= '1' && w <= '3') {
             self->act({{}, 100 + static_cast<int>(w - '1'), {}});
             return 0;
@@ -784,6 +790,16 @@ LRESULT CALLBACK Ui::proc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 self->focus_ = (self->focus_ + (reverse ? count - 1 : 1)) % count;
                 if (self->hits_[self->focus_].action)
                     break;
+            }
+            const auto &hit = self->hits_[self->focus_];
+            if (hit.contentBottom > 0) {
+                if (hit.contentTop - self->detailScroll_ < self->detailViewport_.top)
+                    self->detailScroll_ =
+                        static_cast<int>(hit.contentTop - self->detailViewport_.top);
+                else if (hit.contentBottom - self->detailScroll_ > self->detailViewport_.bottom)
+                    self->detailScroll_ =
+                        static_cast<int>(hit.contentBottom - self->detailViewport_.bottom);
+                self->detailScroll_ = std::clamp(self->detailScroll_, 0, self->detailScrollMax_);
             }
             InvalidateRect(h, nullptr, FALSE);
             return 0;

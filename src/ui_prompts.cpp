@@ -6,6 +6,47 @@
 
 namespace tt::ui {
 namespace {
+constexpr int sourceListTop = 104, sourceListHeight = metrics::preferenceRow * 3 + 2;
+constexpr int sourceFooterTop = sourceListTop + sourceListHeight + metrics::inset;
+constexpr int sourceDialogHeight = sourceFooterTop + metrics::control + metrics::inset;
+bool beginPromptDraw(Prompt &p, HDC dc, const RECT &rect) {
+    if (!p.drawFactory)
+        D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, p.drawFactory.GetAddressOf());
+    if (!p.textFactory)
+        DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                            reinterpret_cast<IUnknown **>(p.textFactory.GetAddressOf()));
+    if (!p.drawTarget && p.drawFactory) {
+        auto properties = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+            static_cast<float>(p.dpi), static_cast<float>(p.dpi));
+        p.drawFactory->CreateDCRenderTarget(&properties, &p.drawTarget);
+    }
+    if (!p.drawTarget || !p.textFactory || FAILED(p.drawTarget->BindDC(dc, &rect)))
+        return false;
+    p.drawTarget->BeginDraw();
+    return true;
+}
+void endPromptDraw(Prompt &p) {
+    if (p.drawTarget->EndDraw() == D2DERR_RECREATE_TARGET) {
+        p.drawTarget.Reset();
+        p.paintCache.icons.clear();
+    }
+}
+LRESULT CALLBACK sourceButtonProc(HWND window, UINT message, WPARAM w, LPARAM l, UINT_PTR,
+                                  DWORD_PTR data) {
+    auto p = reinterpret_cast<Prompt *>(data);
+    if (message == WM_MOUSEMOVE && p->hotButton != GetDlgCtrlID(window)) {
+        p->hotButton = GetDlgCtrlID(window);
+        TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
+        TrackMouseEvent(&tracking);
+        InvalidateRect(window, nullptr, FALSE);
+    } else if (message == WM_MOUSELEAVE) {
+        p->hotButton = 0;
+        InvalidateRect(window, nullptr, FALSE);
+    }
+    return DefSubclassProc(window, message, w, l);
+}
 std::wstring folded(std::wstring value) {
     std::transform(value.begin(), value.end(), value.begin(),
                    [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
@@ -107,6 +148,7 @@ LRESULT CALLBACK promptProc(HWND h, UINT message, WPARAM w, LPARAM l) {
         return DefWindowProcW(h, message, w, l);
     if (message == WM_CREATE) {
         auto dpi = GetDpiForWindow(h);
+        p->dpi = dpi;
         auto s = [&](int value) { return MulDiv(value, dpi, 96); };
         p->font = CreateFontW(-s(metrics::body), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
                               CLEARTYPE_QUALITY, 0, L"Microsoft YaHei UI");
@@ -121,15 +163,10 @@ LRESULT CALLBACK promptProc(HWND h, UINT message, WPARAM w, LPARAM l) {
         if (p->kind == Prompt::GroupMembers) {
             INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_LISTVIEW_CLASSES};
             InitCommonControlsEx(&controls);
-            auto title = L"应用来源 · " + p->appName;
-            control(L"STATIC", title.c_str(), SS_ENDELLIPSIS | SS_NOPREFIX, 24, 18, 388, 26);
-            auto total = L"合计 " + formatDuration(p->baseUsed);
-            control(L"STATIC", total.c_str(), SS_RIGHT, 424, 18, 192, 26);
-            control(L"STATIC", p->appPath.c_str(), SS_PATHELLIPSIS | SS_NOPREFIX, 24, 46, 592, 26,
-                    106);
             p->list = control(WC_LISTVIEWW, L"",
-                              WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 24, 82,
-                              592, 240, 100, WS_EX_CLIENTEDGE);
+                              WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS |
+                                  LVS_NOCOLUMNHEADER | LVS_OWNERDRAWFIXED,
+                              25, sourceListTop + 1, 590, sourceListHeight - 2, 100);
             ListView_SetExtendedListViewStyle(p->list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER |
                                                            LVS_EX_LABELTIP);
             LVCOLUMNW column{};
@@ -142,12 +179,10 @@ LRESULT CALLBACK promptProc(HWND h, UINT message, WPARAM w, LPARAM l) {
                 ListView_InsertColumn(p->list, i, &column);
             }
             p->updatingList = true;
-            listImages(*p, p->members, metrics::preferenceRow, dpi);
             for (size_t i = 0; i < p->members.size(); ++i) {
                 auto name = p->members[i].app.name + (i == 0 ? L" · 主应用" : L"");
                 LVITEMW item{};
-                item.mask = LVIF_TEXT | LVIF_PARAM | LVIF_IMAGE;
-                item.iImage = static_cast<int>(i);
+                item.mask = LVIF_TEXT | LVIF_PARAM;
                 item.iItem = static_cast<int>(i);
                 item.pszText = name.data();
                 item.lParam = static_cast<LPARAM>(i);
@@ -156,14 +191,14 @@ LRESULT CALLBACK promptProc(HWND h, UINT message, WPARAM w, LPARAM l) {
                 ListView_SetItemText(p->list, row, 1, duration.data());
                 ListView_SetItemText(p->list, row, 2, p->members[i].app.path.data());
             }
-            p->detail =
-                control(L"STATIC", L"", SS_EDITCONTROL | SS_NOPREFIX, 24, 330, 592, 42, 105);
-            auto remove = control(L"BUTTON", L"更改归属", WS_TABSTOP, 24, 384, metrics::actionWidth,
-                                  metrics::control, 107);
-            auto primary = control(L"BUTTON", L"设为主应用", WS_TABSTOP, 156, 384,
-                                   metrics::valueWidth, metrics::control, 108);
-            control(L"BUTTON", L"完成", WS_TABSTOP | BS_DEFPUSHBUTTON, 496, 384,
-                    metrics::actionWidth, metrics::control, IDCANCEL);
+            auto remove = control(L"BUTTON", L"更改归属", WS_TABSTOP | BS_OWNERDRAW, 24,
+                                  sourceFooterTop, metrics::actionWidth, metrics::control, 107);
+            auto primary = control(L"BUTTON", L"设为主应用", WS_TABSTOP | BS_OWNERDRAW, 156,
+                                   sourceFooterTop, metrics::valueWidth, metrics::control, 108);
+            auto done = control(L"BUTTON", L"完成", WS_TABSTOP | BS_OWNERDRAW, 496, sourceFooterTop,
+                                metrics::actionWidth, metrics::control, IDCANCEL);
+            for (auto button : {remove, primary, done})
+                SetWindowSubclass(button, sourceButtonProc, 1, reinterpret_cast<DWORD_PTR>(p));
             EnableWindow(remove, FALSE);
             EnableWindow(primary, FALSE);
             p->updatingList = false;
@@ -265,6 +300,93 @@ LRESULT CALLBACK promptProc(HWND h, UINT message, WPARAM w, LPARAM l) {
             SendMessageW(p->edit, EM_SETSEL, 0, -1);
         return 0;
     }
+    if (message == WM_MEASUREITEM && p->kind == Prompt::GroupMembers) {
+        reinterpret_cast<MEASUREITEMSTRUCT *>(l)->itemHeight =
+            MulDiv(metrics::preferenceRow, p->dpi, 96);
+        return TRUE;
+    }
+    if (message == WM_PAINT && p->kind == Prompt::GroupMembers) {
+        PAINTSTRUCT paint{};
+        auto dc = BeginPaint(h, &paint);
+        RECT rect{};
+        GetClientRect(h, &rect);
+        if (beginPromptDraw(*p, dc, rect)) {
+            Canvas c(p->drawTarget.Get(), p->textFactory.Get(), p->paintCache);
+            c.fill({0, 0, 640, sourceDialogHeight}, theme::background);
+            c.text(p->appName, {24, 24, 616, 56}, metrics::title, theme::text, 600);
+            c.text(std::to_wstring(p->members.size()) + L" 个来源", {24, 64, 284, 92},
+                   metrics::body, theme::secondary);
+            c.text(L"合计 " + formatDuration(p->baseUsed), {300, 64, 616, 92}, metrics::body,
+                   theme::secondary, 400, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            c.card({24, sourceListTop, 616, sourceListTop + sourceListHeight});
+            endPromptDraw(*p);
+        }
+        EndPaint(h, &paint);
+        return 0;
+    }
+    if (message == WM_DRAWITEM && p->kind == Prompt::GroupMembers) {
+        auto draw = reinterpret_cast<DRAWITEMSTRUCT *>(l);
+        auto bounds = draw->rcItem;
+        if (draw->CtlType == ODT_LISTVIEW) {
+            RECT client{};
+            GetClientRect(draw->hwndItem, &client);
+            bounds.right = client.right;
+        }
+        if (!beginPromptDraw(*p, draw->hDC, bounds))
+            return TRUE;
+        Canvas c(p->drawTarget.Get(), p->textFactory.Get(), p->paintCache);
+        float width = (bounds.right - bounds.left) * 96.0f / p->dpi;
+        float height = (bounds.bottom - bounds.top) * 96.0f / p->dpi;
+        c.fill({0, 0, width, height}, theme::background);
+        if (draw->CtlType == ODT_LISTVIEW && draw->itemID < p->members.size()) {
+            const auto &member = p->members[draw->itemID];
+            float inset = metrics::inset - 1.0f;
+            float nameLeft = inset + metrics::icon + metrics::inset;
+            float right = width - inset;
+            if (draw->itemState & ODS_SELECTED)
+                c.fill({4, 4, width - 4, height - 4}, theme::hover, metrics::radius);
+            if (!c.icon(member.icon, {inset, 24, inset + metrics::icon, 56}))
+                c.symbol(L'\xE8A5', {inset, 24, inset + metrics::icon, 56}, metrics::title,
+                         theme::tertiary);
+            c.text(member.app.name, {nameLeft, 10, right - metrics::valueWidth, 38});
+            c.text(formatDuration(member.used), {right - metrics::valueWidth, 10, right, 38},
+                   metrics::body, theme::secondary, 400, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            c.text(member.app.path.empty() ? L"路径不可用" : member.app.path,
+                   {nameLeft, 42,
+                    right - (draw->itemID == 0 ? metrics::compactWidth + metrics::gap : 0), 70},
+                   metrics::body, theme::secondary);
+            if (draw->itemID == 0) {
+                c.fill({right - metrics::compactWidth, 44, right, 68}, theme::blueTint,
+                       metrics::radius);
+                c.text(L"主应用", {right - metrics::compactWidth, 44, right, 68}, metrics::body,
+                       theme::blue, 400, DWRITE_TEXT_ALIGNMENT_CENTER);
+            }
+            if (draw->itemID + 1 < p->members.size())
+                c.line(nameLeft, height - 1, right, height - 1, theme::separator);
+        } else if (draw->CtlType == ODT_BUTTON) {
+            bool primary = draw->CtlID == IDCANCEL, disabled = draw->itemState & ODS_DISABLED;
+            bool active =
+                p->hotButton == static_cast<int>(draw->CtlID) || (draw->itemState & ODS_SELECTED);
+            D2D1_RECT_F rect{1, 1, width - 1, height - 1};
+            if (primary)
+                c.fill(rect, active ? 0x006BE0 : theme::blue, metrics::radius);
+            else {
+                c.fill(rect, active && !disabled ? theme::hover : theme::surface, metrics::radius);
+                c.outline(rect, theme::border, metrics::radius);
+            }
+            wchar_t text[32]{};
+            GetWindowTextW(draw->hwndItem, text, 32);
+            c.text(text, rect, metrics::body,
+                   disabled  ? theme::tertiary
+                   : primary ? theme::surface
+                             : theme::text,
+                   400, DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+        if (draw->itemState & ODS_FOCUS)
+            c.outline({4, 4, width - 4, height - 4}, theme::blue, metrics::radius);
+        endPromptDraw(*p);
+        return TRUE;
+    }
     if (message == WM_CTLCOLORSTATIC) {
         auto dc = reinterpret_cast<HDC>(w);
         SetTextColor(dc, RGB(29, 29, 31));
@@ -358,7 +480,6 @@ LRESULT CALLBACK promptProc(HWND h, UINT message, WPARAM w, LPARAM l) {
             auto member = selectedMember(*p);
             EnableWindow(GetDlgItem(h, 107), member > 0);
             EnableWindow(GetDlgItem(h, 108), member > 0);
-            SetWindowTextW(p->detail, member >= 0 ? p->members[member].app.path.c_str() : L"");
             return 0;
         }
     }
@@ -417,7 +538,7 @@ bool showPrompt(HWND owner, Prompt &p) {
     int width = MulDiv(396, dpi, 96), height = MulDiv(tall ? 286 : 242, dpi, 96);
     if (p.kind == Prompt::Merge || p.kind == Prompt::GroupMembers) {
         RECT client{0, 0, MulDiv(640, dpi, 96),
-                    MulDiv(p.kind == Prompt::Merge ? 520 : 444, dpi, 96)};
+                    MulDiv(p.kind == Prompt::Merge ? 520 : sourceDialogHeight, dpi, 96)};
         AdjustWindowRectExForDpi(&client, WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME, dpi);
         width = client.right - client.left;
         height = client.bottom - client.top;
@@ -428,10 +549,11 @@ bool showPrompt(HWND owner, Prompt &p) {
                            : p.kind == Prompt::GroupMembers ? L"应用来源"
                            : p.kind == Prompt::MoveMember   ? L"更改归属"
                                                             : L"添加应用提醒";
-    auto dialog =
-        CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, title, WS_CAPTION | WS_SYSMENU,
-                        (r.left + r.right - width) / 2, (r.top + r.bottom - height) / 2, width,
-                        height, owner, nullptr, wc.hInstance, &p);
+    auto dialog = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, title,
+                                  WS_CAPTION | WS_SYSMENU |
+                                      (p.kind == Prompt::GroupMembers ? WS_CLIPCHILDREN : 0),
+                                  (r.left + r.right - width) / 2, (r.top + r.bottom - height) / 2,
+                                  width, height, owner, nullptr, wc.hInstance, &p);
     if (!dialog)
         return false;
     EnableWindow(owner, FALSE);
@@ -459,6 +581,10 @@ bool showPrompt(HWND owner, Prompt &p) {
         ImageList_Destroy(p.images);
         p.images = nullptr;
     }
+    p.paintCache = {};
+    p.drawTarget.Reset();
+    p.drawFactory.Reset();
+    p.textFactory.Reset();
     return p.accepted;
 }
 } // namespace tt::ui

@@ -1,0 +1,32 @@
+{
+  "sources": 152,
+  "intervals": 7819,
+  "canonical_apps": 63,
+  "raw_intervals_unchanged": true,
+  "source_labels_unchanged": true,
+  "settings_unchanged": true,
+  "manual_assignments_retained": true,
+  "unique_application_names": true,
+  "no_empty_applications": true,
+  "integrity_ok": true,
+  "foreign_keys_ok": true,
+  "segments_sha256": "bffd7a146776d8daaf0b5529ba87862177ca374c0d9fc6c2a7c75c20b8153aa2",
+  "cases": [
+    {
+      "recorded_sources": 2,
+      "passed": true,
+      "case": 1
+    },
+    {
+      "recorded_sources": 8,
+      "passed": true,
+      "case": 2
+    },
+    {
+      "recorded_sources": 4,
+      "passed": true,
+      "case": 3
+    }
+  ],
+  "passed": true
+}

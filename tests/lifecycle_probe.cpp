@@ -64,6 +64,18 @@ int listRow(HANDLE process, HWND list, const wchar_t *name, int column = 0) {
             return i;
     return -1;
 }
+int listRowHeight(HANDLE process, HWND list) {
+    auto remote =
+        VirtualAllocEx(process, nullptr, sizeof(RECT), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!remote)
+        return 0;
+    RECT rect{LVIR_BOUNDS};
+    if (WriteProcessMemory(process, remote, &rect, sizeof(rect), nullptr) &&
+        SendMessageW(list, LVM_GETITEMRECT, 0, reinterpret_cast<LPARAM>(remote)))
+        ReadProcessMemory(process, remote, &rect, sizeof(rect), nullptr);
+    VirtualFreeEx(process, remote, 0, MEM_RELEASE);
+    return rect.bottom - rect.top;
+}
 bool setListState(HANDLE process, HWND list, int row, UINT state, UINT mask) {
     if (row < 0)
         return false;
@@ -164,6 +176,7 @@ int wmain(int argc, wchar_t **argv) {
     std::vector<std::pair<DWORD, DWORD>> handles;
     int cycles{}, failures{};
     bool promptMetricsPassed = false;
+    bool sourceStylePassed = false, sourceMinimumPassed = false;
     bool framePassed = true, keyboardPassed = false, directEditOpened = false,
          clearCancelPassed = false, reminderScrollPassed = false, historicalIdentityPassed = false,
          mergeIdentityPassed = false, mergeSearchPassed = false, mergeMultiplePassed = false,
@@ -332,7 +345,9 @@ int wmain(int argc, wchar_t **argv) {
         }
         if (i == 2) {
             auto openMembers = [&] {
-                click(window, width - edge - 40, height - 90);
+                SendMessageW(window, WM_KEYDOWN, VK_END, 0);
+                Sleep(100);
+                click(window, width - edge - 64, height - 112);
                 return waitWindow(app.dwProcessId, L"TimeTrace.GroupMembers");
             };
             auto dialog = openMembers();
@@ -341,6 +356,13 @@ int wmain(int argc, wchar_t **argv) {
                 membersViewPassed = ListView_GetItemCount(list) == 4 &&
                                     !IsWindowEnabled(GetDlgItem(dialog, 107)) &&
                                     !IsWindowEnabled(GetDlgItem(dialog, 108));
+                auto style = GetWindowLongPtrW(list, GWL_STYLE);
+                RECT action{};
+                GetWindowRect(GetDlgItem(dialog, 107), &action);
+                sourceStylePassed =
+                    (style & LVS_OWNERDRAWFIXED) && (style & LVS_NOCOLUMNHEADER) &&
+                    listRowHeight(app.hProcess, list) == MulDiv(80, GetDpiForWindow(dialog), 96) &&
+                    action.bottom - action.top == MulDiv(36, GetDpiForWindow(dialog), 96);
                 capture(dialog, output + L".members.bmp");
                 auto code = listRow(app.hProcess, list, L"Visual Studio Code");
                 if (setListState(app.hProcess, list, code, LVIS_SELECTED | LVIS_FOCUSED,
@@ -350,9 +372,8 @@ int wmain(int argc, wchar_t **argv) {
                     dialog = openMembers();
                     if (dialog) {
                         list = GetDlgItem(dialog, 100);
-                        wchar_t path[512]{};
-                        GetWindowTextW(GetDlgItem(dialog, 106), path, 512);
-                        primaryChangedPassed = wcscmp(path, L"C:\\Apps\\Code.exe") == 0 &&
+                        auto path = listText(app.hProcess, list, 0, 2);
+                        primaryChangedPassed = path == L"C:\\Apps\\Code.exe" &&
                                                ListView_GetItemCount(list) == 4 &&
                                                !IsWindowEnabled(GetDlgItem(dialog, 107));
                         auto chrome =
@@ -417,6 +438,21 @@ int wmain(int argc, wchar_t **argv) {
                         finishDialog(dialog, IDCANCEL);
                 }
             }
+            SetWindowPos(window, nullptr, 0, 0, MulDiv(920, dpi, 96), MulDiv(680, dpi, 96),
+                         SWP_NOMOVE | SWP_NOZORDER);
+            Sleep(150);
+            SendMessageW(window, WM_KEYDOWN, VK_END, 0);
+            Sleep(100);
+            capture(window, output + L".detail-sources-minimum.bmp");
+            click(window, 920 - 46 - 64, 680 - 112);
+            dialog = waitWindow(app.dwProcessId, L"TimeTrace.GroupMembers");
+            if (dialog) {
+                sourceMinimumPassed = ListView_GetItemCount(GetDlgItem(dialog, 100)) == 4;
+                finishDialog(dialog, IDCANCEL);
+            }
+            SetWindowPos(window, nullptr, 0, 0, MulDiv(width, dpi, 96), MulDiv(height, dpi, 96),
+                         SWP_NOMOVE | SWP_NOZORDER);
+            Sleep(150);
         }
         if (i == 3) {
             click(window, width / 2, 34);
@@ -577,9 +613,12 @@ int wmain(int argc, wchar_t **argv) {
                   mergeIdentityPassed && mergeSearchPassed && mergeMultiplePassed &&
                   mergePreviewPassed && mergeTargetPassed && mergeRelatedPassed &&
                   membersViewPassed && primaryChangedPassed && memberMoveCancelPassed &&
-                  memberMovePassed && memberRemergePassed && afterGdi <= baseGdi + 5 &&
-                  afterUser <= baseUser + 5 && memory.PrivateWorkingSetSize <= 50000000;
+                  memberMovePassed && memberRemergePassed && sourceStylePassed &&
+                  sourceMinimumPassed && afterGdi <= baseGdi + 5 && afterUser <= baseUser + 5 &&
+                  memory.PrivateWorkingSetSize <= 50000000;
     file << "{\n  \"cycles\": " << cycles << ",\n  \"failures\": " << failures
+         << ",\n  \"native_source_styles\": " << (sourceStylePassed ? "true" : "false")
+         << ",\n  \"native_source_minimum\": " << (sourceMinimumPassed ? "true" : "false")
          << ",\n  \"native_prompt_metrics\": " << (promptMetricsPassed ? "true" : "false")
          << ",\n  \"native_window_frame\": " << (framePassed ? "true" : "false")
          << ",\n  \"native_keyboard_navigation\": " << (keyboardPassed ? "true" : "false")

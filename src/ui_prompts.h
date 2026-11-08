@@ -1,5 +1,5 @@
 #pragma once
-#include "core.h"
+#include "ui_canvas.h"
 #include <windows.h>
 #include <commctrl.h>
 namespace tt::ui {
@@ -19,6 +19,12 @@ struct Prompt {
     std::vector<std::string> targets;
     std::vector<AppRow> members;
     bool updatingList{};
+    UINT dpi{96};
+    int hotButton{};
+    ComPtr<ID2D1Factory> drawFactory;
+    ComPtr<IDWriteFactory> textFactory;
+    ComPtr<ID2D1DCRenderTarget> drawTarget;
+    PaintCache paintCache;
 };
 bool showPrompt(HWND owner, Prompt &prompt);
 } // namespace tt::ui

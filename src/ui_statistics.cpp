@@ -161,12 +161,21 @@ void Ui::drawDetail(ui::Canvas &c, float x, float right, float height) {
     drawUsage(c, x, right, height, snapshot_.selectedTotal);
     float reminderTop = height * .60f;
     c.line(x, reminderTop - size::gap, right, reminderTop - size::gap, theme::separator);
+    const auto *view = reminder(selected_);
+    bool actions = view && !view->state.token.empty();
+    float barTop = height - size::detailBarBottom - size::control;
+    float sourceTop = reminderTop + 40 + size::preferenceRow + size::gap +
+                      (actions ? size::control + size::gap : 0);
+    detailViewport_ = {x - 1, reminderTop, right + 1, barTop - 16};
+    detailScrollMax_ = static_cast<int>(
+        std::max(0.0f, sourceTop + 40 + size::preferenceRow - detailViewport_.bottom));
+    detailScroll_ = std::clamp(detailScroll_, 0, detailScrollMax_);
+    auto firstHit = hits_.size();
+    c.rt->PushAxisAlignedClip(detailViewport_, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    reminderTop -= detailScroll_;
     c.text(L"应用提醒", {x, reminderTop, right, reminderTop + 32}, size::title, theme::text, 600);
     float rowTop = reminderTop + 40;
-    float barTop = height - size::detailBarBottom - size::control;
-    float membersTop = barTop - size::control - 16;
     c.card({x, rowTop, right, rowTop + size::preferenceRow});
-    auto view = reminder(selected_);
     if (view) {
         auto column = ui::reminderValueRect(right, reminderTop);
         column.right -= 20;
@@ -174,30 +183,43 @@ void Ui::drawDetail(ui::Canvas &c, float x, float right, float height) {
         c.text(L"每日时长", column, size::body, theme::secondary, 400,
                DWRITE_TEXT_ALIGNMENT_CENTER);
         appReminderRow(c, *view, x, right, rowTop, false);
-        if (!view->state.token.empty())
-            reminderActions(
-                c, right - size::inset,
-                std::min(rowTop + size::preferenceRow + size::gap, membersTop - size::control - 4),
-                selected_);
+        if (actions)
+            reminderActions(c, right - size::inset, rowTop + size::preferenceRow + size::gap,
+                            selected_);
     } else if (selected_ != "app:unidentified") {
         c.rowText(L"尚未设置", {}, x + size::inset, rowTop, right - 180);
         button(c, ui::controlRect(right - size::inset, rowTop + 22), L"添加提醒", 207, selected_,
                true);
     } else
         c.rowText(L"此项暂无法设置提醒", {}, x + size::inset, rowTop, right - size::inset);
-    c.text(L"应用来源", {x, membersTop, x + 104, membersTop + size::control}, size::body,
-           theme::text, 600);
-    std::wstring members;
-    for (size_t i = 1; i < snapshot_.members.size(); ++i)
-        members += (members.empty() ? L"" : L"、") + snapshot_.members[i].app.name;
-    c.text(
-        members.empty() ? L"单一来源" : members,
-        {x + 112, membersTop, right - size::compactWidth - size::gap, membersTop + size::control},
-        size::body, theme::secondary);
-    if (!snapshot_.members.empty())
-        linkButton(c, ui::controlRect(right, membersTop, size::compactWidth), L"管理", 217,
-                   selected_);
-    c.line(x, barTop - 16, right, barTop - 16, theme::separator);
+    sourceTop -= detailScroll_;
+    c.text(L"应用来源", {x, sourceTop, right, sourceTop + 32}, size::title, theme::text, 600);
+    float sourceRow = sourceTop + 40;
+    c.card({x, sourceRow, right, sourceRow + size::preferenceRow});
+    if (sourceRow + 26 >= detailViewport_.top && sourceRow + 54 <= detailViewport_.bottom)
+        c.rowText(std::to_wstring(snapshot_.members.size()) + L" 个来源", {}, x + size::inset,
+                  sourceRow, right - 160);
+    if (!snapshot_.members.empty()) {
+        auto action = ui::controlRect(right - size::inset, sourceRow + 22, size::compactWidth);
+        if (action.top >= detailViewport_.top && action.bottom <= detailViewport_.bottom)
+            linkButton(c, action, L"管理", 217, selected_, false, true);
+        else
+            hits_.push_back({action, 217, selected_});
+    }
+    c.rt->PopAxisAlignedClip();
+    for (size_t i = firstHit; i < hits_.size(); ++i) {
+        auto &hit = hits_[i];
+        hit.contentTop = hit.rect.top + detailScroll_;
+        hit.contentBottom = hit.rect.bottom + detailScroll_;
+        hit.rect.top = std::max(hit.rect.top, detailViewport_.top);
+        hit.rect.bottom = std::min(hit.rect.bottom, detailViewport_.bottom);
+    }
+    if (detailScrollMax_) {
+        float track = detailViewport_.bottom - detailViewport_.top;
+        float thumb = track * track / (track + detailScrollMax_);
+        float top = detailViewport_.top + (track - thumb) * detailScroll_ / detailScrollMax_;
+        c.fill({right + 10, top, right + 14, top + thumb}, theme::border, 2);
+    }
     const AppRow *chosen = snapshot_.selected.app.id == selected_ ? &snapshot_.selected : nullptr;
     AppRow fallback;
     if (!chosen)
@@ -219,5 +241,11 @@ void Ui::drawDetail(ui::Canvas &c, float x, float right, float height) {
             return app.id != selected_ && app.id != "app:unidentified" && app.hasUsage;
         }))
         button(c, ui::controlRect(right, barTop), L"合并记录", 213, selected_);
+}
+void Ui::scrollDetail(int delta) {
+    detailScroll_ = std::clamp(detailScroll_ + delta, 0, detailScrollMax_);
+    hover_ = focus_ = -1;
+    if (window_)
+        InvalidateRect(window_, nullptr, FALSE);
 }
 } // namespace tt

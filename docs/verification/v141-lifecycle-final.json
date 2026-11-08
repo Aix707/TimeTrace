@@ -1,0 +1,117 @@
+{
+  "cycles": 19,
+  "failures": 0,
+  "native_source_styles": true,
+  "native_source_minimum": true,
+  "native_prompt_metrics": true,
+  "native_window_frame": true,
+  "native_keyboard_navigation": true,
+  "native_reminder_dialog_saved": true,
+  "native_rename_saved": true,
+  "native_merge_saved": true,
+  "native_historical_identity": true,
+  "native_merge_kept_current_identity": true,
+  "native_merge_search_and_selection": true,
+  "native_merge_multiple_records": true,
+  "native_merge_usage_preview": true,
+  "native_merge_explicit_target": true,
+  "native_merge_related_selection": true,
+  "native_members_view": true,
+  "native_primary_changed": true,
+  "native_member_move_cancel": true,
+  "native_member_moved": true,
+  "native_member_remerged": true,
+  "native_device_and_add_saved": true,
+  "native_inline_reminder_edit": true,
+  "native_clear_history_cancel": true,
+  "native_reminder_scroll": true,
+  "autostart_test_skipped": true,
+  "backend_survived_window_close": true,
+  "baseline_gdi_handles": 67,
+  "final_gdi_handles": 67,
+  "baseline_user_handles": 46,
+  "final_user_handles": 45,
+  "private_working_set_after_cycles": 22228992,
+  "warmup_cycles": 7,
+  "measured_cycles": 12,
+  "handle_samples": [
+    [
+      54,
+      35
+    ],
+    [
+      58,
+      38
+    ],
+    [
+      64,
+      38
+    ],
+    [
+      64,
+      38
+    ],
+    [
+      64,
+      38
+    ],
+    [
+      64,
+      38
+    ],
+    [
+      67,
+      46
+    ],
+    [
+      67,
+      46
+    ],
+    [
+      67,
+      46
+    ],
+    [
+      67,
+      46
+    ],
+    [
+      67,
+      46
+    ],
+    [
+      67,
+      46
+    ],
+    [
+      67,
+      45
+    ],
+    [
+      67,
+      45
+    ],
+    [
+      67,
+      45
+    ],
+    [
+      67,
+      45
+    ],
+    [
+      67,
+      45
+    ],
+    [
+      67,
+      45
+    ],
+    [
+      67,
+      45
+    ]
+  ],
+  "passed": true,
+  "binary_sha256": "817acca796a54f0de314467cb09407c6334a1e5c676c7b714ee78d9fc2425921"
+}
