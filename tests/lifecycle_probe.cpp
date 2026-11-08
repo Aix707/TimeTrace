@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <commctrl.h>
 #include <fstream>
 #include <algorithm>
 #include <psapi.h>
@@ -29,6 +30,58 @@ HWND findWindow(DWORD pid, const wchar_t *cls) {
         },
         reinterpret_cast<LPARAM>(&f));
     return f.window;
+}
+HWND waitWindow(DWORD pid, const wchar_t *cls) {
+    for (int i = 0; i < 100; ++i) {
+        if (auto window = findWindow(pid, cls))
+            return window;
+        Sleep(25);
+    }
+    return nullptr;
+}
+std::wstring listText(HANDLE process, HWND list, int row, int column) {
+    constexpr int capacity = 4096;
+    auto remote = VirtualAllocEx(process, nullptr, sizeof(LVITEMW) + capacity * sizeof(wchar_t),
+                                 MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!remote)
+        return {};
+    LVITEMW item{};
+    item.iSubItem = column;
+    item.pszText = reinterpret_cast<wchar_t *>(static_cast<char *>(remote) + sizeof(item));
+    item.cchTextMax = capacity;
+    std::vector<wchar_t> text(capacity);
+    if (WriteProcessMemory(process, remote, &item, sizeof(item), nullptr)) {
+        SendMessageW(list, LVM_GETITEMTEXTW, row, reinterpret_cast<LPARAM>(remote));
+        ReadProcessMemory(process, item.pszText, text.data(), text.size() * sizeof(wchar_t),
+                          nullptr);
+    }
+    VirtualFreeEx(process, remote, 0, MEM_RELEASE);
+    return text.data();
+}
+int listRow(HANDLE process, HWND list, const wchar_t *name, int column = 0) {
+    for (int i = 0; i < ListView_GetItemCount(list); ++i)
+        if (listText(process, list, i, column) == name)
+            return i;
+    return -1;
+}
+bool setListState(HANDLE process, HWND list, int row, UINT state, UINT mask) {
+    if (row < 0)
+        return false;
+    auto remote =
+        VirtualAllocEx(process, nullptr, sizeof(LVITEMW), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!remote)
+        return false;
+    LVITEMW item{};
+    item.stateMask = mask;
+    item.state = state;
+    bool changed = WriteProcessMemory(process, remote, &item, sizeof(item), nullptr) &&
+                   SendMessageW(list, LVM_SETITEMSTATE, row, reinterpret_cast<LPARAM>(remote));
+    VirtualFreeEx(process, remote, 0, MEM_RELEASE);
+    return changed;
+}
+bool checkListRow(HANDLE process, HWND list, int row) {
+    return setListState(process, list, row, INDEXTOSTATEIMAGEMASK(2) | LVIS_SELECTED,
+                        LVIS_STATEIMAGEMASK | LVIS_SELECTED);
 }
 PROCESS_INFORMATION launch(const std::wstring &exe, const std::wstring &args) {
     STARTUPINFOW si{sizeof(si)};
@@ -112,8 +165,11 @@ int wmain(int argc, wchar_t **argv) {
     int cycles{}, failures{};
     bool promptMetricsPassed = false;
     bool framePassed = true, keyboardPassed = false, directEditOpened = false,
-         clearCancelPassed = false, reminderScrollPassed = false,
-         historicalIdentityPassed = false, mergeIdentityPassed = false;
+         clearCancelPassed = false, reminderScrollPassed = false, historicalIdentityPassed = false,
+         mergeIdentityPassed = false, mergeSearchPassed = false, mergeMultiplePassed = false,
+         mergePreviewPassed = false, mergeTargetPassed = false, mergeRelatedPassed = false,
+         membersViewPassed = false, primaryChangedPassed = false, memberMoveCancelPassed = false,
+         memberMovePassed = false, memberRemergePassed = false;
     bool reminderSaved = false, renamed = false, merged = false, settingsVisited = false,
          deviceSaved = false, addedSaved = false;
     constexpr int warmupCycles = 7, measuredCycles = 12;
@@ -210,16 +266,54 @@ int wmain(int argc, wchar_t **argv) {
                 Sleep(300);
             }
             click(window, width - edge - 60, height - 38);
-            dialog = findWindow(app.dwProcessId, L"TimeTrace.Merge");
+            dialog = waitWindow(app.dwProcessId, L"TimeTrace.Merge");
             if (dialog) {
                 capture(dialog, output + L".merge-dialog.bmp");
-                auto combo = GetDlgItem(dialog, 100);
-                auto item = SendMessageW(combo, CB_FINDSTRINGEXACT, static_cast<WPARAM>(-1),
-                                         reinterpret_cast<LPARAM>(L"Visual Studio Code"));
-                if (item != CB_ERR) {
-                    SendMessageW(combo, CB_SETCURSEL, item, 0);
-                    SendMessageW(dialog, WM_COMMAND, MAKEWPARAM(100, CBN_SELCHANGE),
-                                 reinterpret_cast<LPARAM>(combo));
+                auto list = GetDlgItem(dialog, 100), search = GetDlgItem(dialog, 102);
+                wchar_t label[512]{};
+                GetWindowTextW(FindWindowExW(dialog, nullptr, L"STATIC", nullptr), label, 512);
+                mergeTargetPassed = wcscmp(label, L"并入 演示应用") == 0;
+                GetWindowTextW(GetDlgItem(dialog, 106), label, 512);
+                mergeTargetPassed =
+                    mergeTargetPassed && wcscmp(label, L"C:\\Apps\\Chrome\\chrome.exe") == 0;
+                bool initiallyEmpty = !IsWindowEnabled(GetDlgItem(dialog, IDOK));
+                SendMessageW(search, WM_SETTEXT, 0,
+                             reinterpret_cast<LPARAM>(L"Visual Studio Code"));
+                auto code = listRow(app.hProcess, list, L"Visual Studio Code");
+                bool codeSelected =
+                    code >= 0 && ListView_GetItemCount(list) == 1 &&
+                    listText(app.hProcess, list, code, 1) == L"C:\\Apps\\Code.exe" &&
+                    checkListRow(app.hProcess, list, code);
+                SendMessageW(search, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(L"chrome-helper.exe"));
+                auto helper = listRow(app.hProcess, list, L"Chrome Helper");
+                bool helperSelected = helper >= 0 && ListView_GetItemCount(list) == 1 &&
+                                      checkListRow(app.hProcess, list, helper);
+                SendMessageW(search, WM_SETTEXT, 0,
+                             reinterpret_cast<LPARAM>(L"no-matching-record"));
+                bool emptyFilter = ListView_GetItemCount(list) == 0;
+                GetWindowTextW(GetDlgItem(dialog, 104), label, 512);
+                bool retainedCount = std::wstring(label).find(L"已选 2 项") != std::wstring::npos;
+                SendMessageW(search, WM_SETTEXT, 0, reinterpret_cast<LPARAM>(L""));
+                code = listRow(app.hProcess, list, L"Visual Studio Code");
+                helper = listRow(app.hProcess, list, L"Chrome Helper");
+                mergeSearchPassed = codeSelected && helperSelected && emptyFilter &&
+                                    retainedCount && code >= 0 && helper >= 0 &&
+                                    ListView_GetCheckState(list, code) &&
+                                    ListView_GetCheckState(list, helper);
+                auto related = GetDlgItem(dialog, 103);
+                bool relatedEnabled = IsWindowEnabled(related);
+                SendMessageW(related, BM_CLICK, 0, 0);
+                auto old = listRow(app.hProcess, list, L"Chrome Old");
+                mergeRelatedPassed = relatedEnabled && old >= 0 &&
+                                     ListView_GetCheckState(list, old) &&
+                                     SendMessageW(related, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                GetWindowTextW(GetDlgItem(dialog, 104), label, 512);
+                mergeMultiplePassed = initiallyEmpty && mergeSearchPassed && mergeRelatedPassed &&
+                                      std::wstring(label).find(L"已选 3 项") != std::wstring::npos;
+                mergePreviewPassed =
+                    std::wstring(label).find(L"合并后用时 2小时11分钟") != std::wstring::npos;
+                capture(dialog, output + L".merge-selected.bmp");
+                if (mergeMultiplePassed && mergePreviewPassed) {
                     finishDialog(dialog, IDOK);
                     merged = true;
                     Sleep(300);
@@ -234,6 +328,86 @@ int wmain(int argc, wchar_t **argv) {
                     }
                 } else
                     SendMessageW(dialog, WM_CLOSE, 0, 0);
+            }
+        }
+        if (i == 2) {
+            auto openMembers = [&] {
+                click(window, width - edge - 40, height - 90);
+                return waitWindow(app.dwProcessId, L"TimeTrace.GroupMembers");
+            };
+            auto dialog = openMembers();
+            if (dialog) {
+                auto list = GetDlgItem(dialog, 100);
+                membersViewPassed = ListView_GetItemCount(list) == 4 &&
+                                    !IsWindowEnabled(GetDlgItem(dialog, 107)) &&
+                                    !IsWindowEnabled(GetDlgItem(dialog, 108));
+                capture(dialog, output + L".members.bmp");
+                auto code = listRow(app.hProcess, list, L"Visual Studio Code");
+                if (setListState(app.hProcess, list, code, LVIS_SELECTED | LVIS_FOCUSED,
+                                 LVIS_SELECTED | LVIS_FOCUSED)) {
+                    finishDialog(dialog, 108);
+                    Sleep(300);
+                    dialog = openMembers();
+                    if (dialog) {
+                        list = GetDlgItem(dialog, 100);
+                        wchar_t path[512]{};
+                        GetWindowTextW(GetDlgItem(dialog, 106), path, 512);
+                        primaryChangedPassed = wcscmp(path, L"C:\\Apps\\Code.exe") == 0 &&
+                                               ListView_GetItemCount(list) == 4 &&
+                                               !IsWindowEnabled(GetDlgItem(dialog, 107));
+                        auto chrome =
+                            listRow(app.hProcess, list, L"C:\\Apps\\Chrome\\chrome.exe", 2);
+                        if (setListState(app.hProcess, list, chrome, LVIS_SELECTED | LVIS_FOCUSED,
+                                         LVIS_SELECTED | LVIS_FOCUSED)) {
+                            PostMessageW(dialog, WM_COMMAND, 107, 0);
+                            auto confirmation = waitWindow(app.dwProcessId, L"#32770");
+                            if (confirmation) {
+                                finishDialog(confirmation, IDNO);
+                                memberMoveCancelPassed =
+                                    IsWindow(dialog) && ListView_GetItemCount(list) == 4;
+                                PostMessageW(dialog, WM_COMMAND, 107, 0);
+                                confirmation = waitWindow(app.dwProcessId, L"#32770");
+                                if (confirmation) {
+                                    finishDialog(confirmation, IDYES);
+                                    Sleep(300);
+                                    dialog = openMembers();
+                                    if (dialog) {
+                                        list = GetDlgItem(dialog, 100);
+                                        memberMovePassed =
+                                            ListView_GetItemCount(list) == 3 &&
+                                            listRow(app.hProcess, list,
+                                                    L"C:\\Apps\\Chrome\\chrome.exe", 2) < 0;
+                                        capture(dialog, output + L".members-moved.bmp");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (IsWindow(dialog))
+                    finishDialog(dialog, IDCANCEL);
+            }
+            if (memberMovePassed) {
+                click(window, width - edge - 60, height - 38);
+                dialog = waitWindow(app.dwProcessId, L"TimeTrace.Merge");
+                if (dialog) {
+                    auto search = GetDlgItem(dialog, 102), list = GetDlgItem(dialog, 100);
+                    SendMessageW(search, WM_SETTEXT, 0,
+                                 reinterpret_cast<LPARAM>(L"C:\\Apps\\Chrome\\chrome.exe"));
+                    auto chrome = listRow(app.hProcess, list, L"C:\\Apps\\Chrome\\chrome.exe", 1);
+                    if (checkListRow(app.hProcess, list, chrome)) {
+                        finishDialog(dialog, IDOK);
+                        Sleep(300);
+                        dialog = openMembers();
+                        if (dialog) {
+                            memberRemergePassed =
+                                ListView_GetItemCount(GetDlgItem(dialog, 100)) == 4;
+                            capture(dialog, output + L".members-remerged.bmp");
+                        }
+                    }
+                    if (IsWindow(dialog))
+                        finishDialog(dialog, IDCANCEL);
+                }
             }
         }
         if (i == 3) {
@@ -368,7 +542,9 @@ int wmain(int argc, wchar_t **argv) {
                 "app='chrome'),'chrome') chrome,COALESCE((SELECT target FROM app_links "
                 "WHERE app='explorer'),'explorer') explorer) "
                 "SELECT (SELECT name FROM app_labels WHERE app=roots.chrome)='演示应用',"
-                "(SELECT target FROM app_links WHERE app='code')=roots.chrome,"
+                "COALESCE((SELECT target FROM app_links WHERE app='code'),'code')=roots.chrome AND "
+                "(SELECT target FROM app_links WHERE app='chrome-helper')=roots.chrome AND "
+                "(SELECT target FROM app_links WHERE app='chrome-old')=roots.chrome,"
                 "(SELECT duration FROM reminder_rules WHERE app=roots.chrome)=60000 AND "
                 "(SELECT duration FROM reminder_rules WHERE kind=0)=2700000 AND "
                 "(SELECT enabled FROM reminder_rules WHERE kind=0)=1 AND "
@@ -387,7 +563,10 @@ int wmain(int argc, wchar_t **argv) {
                   renamed && merged && persisted && settingsVisited && deviceSaved && addedSaved &&
                   framePassed && promptMetricsPassed && keyboardPassed && directEditOpened &&
                   clearCancelPassed && reminderScrollPassed && historicalIdentityPassed &&
-                  mergeIdentityPassed && afterGdi <= baseGdi + 5 &&
+                  mergeIdentityPassed && mergeSearchPassed && mergeMultiplePassed &&
+                  mergePreviewPassed && mergeTargetPassed && mergeRelatedPassed &&
+                  membersViewPassed && primaryChangedPassed && memberMoveCancelPassed &&
+                  memberMovePassed && memberRemergePassed && afterGdi <= baseGdi + 5 &&
                   afterUser <= baseUser + 5 && memory.PrivateWorkingSetSize <= 50000000;
     file << "{\n  \"cycles\": " << cycles << ",\n  \"failures\": " << failures
          << ",\n  \"native_prompt_metrics\": " << (promptMetricsPassed ? "true" : "false")
@@ -396,10 +575,19 @@ int wmain(int argc, wchar_t **argv) {
          << ",\n  \"native_reminder_dialog_saved\": " << (reminderSaved ? "true" : "false")
          << ",\n  \"native_rename_saved\": " << (renamed && persisted ? "true" : "false")
          << ",\n  \"native_merge_saved\": " << (merged && persisted ? "true" : "false")
-         << ",\n  \"native_historical_identity\": "
-         << (historicalIdentityPassed ? "true" : "false")
+         << ",\n  \"native_historical_identity\": " << (historicalIdentityPassed ? "true" : "false")
          << ",\n  \"native_merge_kept_current_identity\": "
          << (mergeIdentityPassed ? "true" : "false")
+         << ",\n  \"native_merge_search_and_selection\": " << (mergeSearchPassed ? "true" : "false")
+         << ",\n  \"native_merge_multiple_records\": " << (mergeMultiplePassed ? "true" : "false")
+         << ",\n  \"native_merge_usage_preview\": " << (mergePreviewPassed ? "true" : "false")
+         << ",\n  \"native_merge_explicit_target\": " << (mergeTargetPassed ? "true" : "false")
+         << ",\n  \"native_merge_related_selection\": " << (mergeRelatedPassed ? "true" : "false")
+         << ",\n  \"native_members_view\": " << (membersViewPassed ? "true" : "false")
+         << ",\n  \"native_primary_changed\": " << (primaryChangedPassed ? "true" : "false")
+         << ",\n  \"native_member_move_cancel\": " << (memberMoveCancelPassed ? "true" : "false")
+         << ",\n  \"native_member_moved\": " << (memberMovePassed ? "true" : "false")
+         << ",\n  \"native_member_remerged\": " << (memberRemergePassed ? "true" : "false")
          << ",\n  \"native_device_and_add_saved\": "
          << (deviceSaved && addedSaved && persisted ? "true" : "false")
          << ",\n  \"native_inline_reminder_edit\": " << (directEditOpened ? "true" : "false")

@@ -54,6 +54,11 @@ struct AppRow {
     Millis used{};
     std::shared_ptr<void> icon;
 };
+struct MergeCandidate {
+    AppInfo app;
+    bool related{};
+    Millis used{};
+};
 struct Snapshot {
     std::string day;
     bool weekly{}, paused{};
@@ -62,7 +67,10 @@ struct Snapshot {
     std::vector<Millis> buckets;
     std::vector<AppRow> apps;
     AppRow selected;
+    std::vector<AppRow> members;
     std::vector<AppInfo> catalog;
+    std::string mergeFor;
+    std::vector<MergeCandidate> mergeCandidates;
     std::vector<ReminderView> reminders;
     std::wstring error;
 };

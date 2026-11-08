@@ -34,7 +34,7 @@ class Ui {
     size_t requestedIconCount_{};
     int page_{}, scroll_{}, focus_{-1}, hover_{-1};
     bool weekly_{}, followToday_{true};
-    std::string day_, selected_;
+    std::string day_, selected_, pendingMerge_;
     struct Hit {
         D2D1_RECT_F rect;
         int action;
@@ -74,6 +74,7 @@ class Ui {
     void act(const Hit &hit);
     void promptReminder(const std::string &app, bool device = false, bool chooseApp = false);
     void promptApp(const std::string &app, bool merge);
+    void promptMembers(const std::string &app);
     void drawReminders(ui::Canvas &canvas, float x, float right, float height);
     const ReminderView *reminder(const std::string &app) const;
     static LRESULT CALLBACK proc(HWND, UINT, WPARAM, LPARAM);

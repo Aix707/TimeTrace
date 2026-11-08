@@ -21,6 +21,9 @@ class Storage {
     std::vector<AppInfo> identitySources();
     void renameApp(const std::string &app, const std::wstring &name);
     void mergeApps(const std::string &source, const std::string &target);
+    void mergeApps(const std::vector<std::string> &sources, const std::string &target);
+    void unmergeApp(const std::string &group, const std::string &member);
+    std::string setPrimary(const std::string &group, const std::string &member);
     bool setReminder(const std::string &app, Millis duration, bool enabled = true);
     void removeReminder(int64_t rule);
     std::vector<ReminderRule> reminderRules();

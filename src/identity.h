@@ -31,6 +31,8 @@ class IdentityCatalog {
     explicit IdentityCatalog(std::vector<IdentityProduct> products);
     ~IdentityCatalog();
     ResolvedApp identify(const AppInfo &source, const IdentityContext &context);
+    std::vector<MergeCandidate> mergeCandidates(const std::vector<AppInfo> &catalog,
+                                                const std::string &current) const;
 
   private:
     struct Impl;

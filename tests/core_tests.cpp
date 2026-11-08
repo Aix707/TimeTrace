@@ -67,16 +67,19 @@ void fixture(const std::filesystem::path &dir) {
     }
     auto base = hi + 18 * 3600000;
     for (const auto &a :
-         std::vector<AppInfo>{{"chrome", L"Google Chrome",
-                               L"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"},
+         std::vector<AppInfo>{{"chrome", L"Google Chrome", L"C:\\Apps\\Chrome\\chrome.exe"},
                               {"code", L"Visual Studio Code", L"C:\\Apps\\Code.exe"},
                               {"wechat", L"微信", L"C:\\Apps\\WeChat.exe"},
                               {"explorer", L"文件资源管理器", L"C:\\Windows\\explorer.exe"}})
         db.app(a);
+    db.app({"chrome-helper", L"Chrome Helper", L"C:\\Apps\\Chrome\\chrome-helper.exe"});
+    db.app({"chrome-old", L"Chrome Old", L"C:\\Apps\\Chrome\\chrome-old.exe"});
     db.save({{"chrome", base - 5 * 3600000, 4860000},
              {"code", base - 3 * 3600000, 3000000},
              {"wechat", base - 2 * 3600000, 1560000},
-             {"explorer", base - 1200000, 660000}});
+             {"explorer", base - 1200000, 660000},
+             {"chrome-helper", base - 100000, 5000},
+             {"chrome-old", base - 90000, 7000}});
     db.setReminder("chrome", 7200000);
     db.setReminder("wechat", 1800000);
 }
@@ -497,6 +500,302 @@ void mergeTests(const std::filesystem::path &dir) {
     db.mergeApps("c", "a");
     require(db.appMappings()["a"] == "c", "Same group merge no cycle");
 }
+void batchMergeTests(const std::filesystem::path &dir) {
+    auto file = dir / L"batch-merge.db";
+    Storage db(file);
+    constexpr Millis base = 1700000000000;
+    auto day = localDay(base);
+    for (auto id : {"target", "a", "alias", "b", "c", "x", "y"})
+        db.app({id, wide(id), {}});
+    db.save({{"target", base, 1000},
+             {"a", base + 1000, 2000},
+             {"b", base + 3000, 3000},
+             {"c", base + 6000, 4000},
+             {"alias", base + 10000, 5000}});
+    db.renameApp("target", L"Current application");
+    db.mergeApps("alias", "a");
+    db.setReminder("a", 1000);
+    db.setReminder("target", 5000);
+    db.setReminder("c", 9000);
+    auto ruleId = [&](const std::string &app) {
+        for (const auto &rule : db.reminderRules())
+            if (rule.app == app)
+                return rule.id;
+        return int64_t{};
+    };
+    auto targetRule = ruleId("target");
+    db.commit({}, {{ruleId("a"), day, 307000, false, false, "source-token"},
+                   {targetRule, day, 0, false, true, "target-token"},
+                   {ruleId("c"), day, 104000, false, false, "other-token"}});
+    db.mergeApps(std::vector<std::string>{"a", "alias", "b", "c", "a", "target"}, "target");
+    auto snapshot = db.snapshot(day, false, "target");
+    require(snapshot.total == 15000 && snapshot.selectedTotal == 15000 &&
+                snapshot.apps.size() == 1 && snapshot.selected.app.name == L"Current application",
+            "Batch merge deduplicates aliases and keeps the current application name and total");
+    auto mapping = db.appMappings();
+    require(mapping["a"] == "target" && mapping["alias"] == "target" && mapping["b"] == "target" &&
+                mapping["c"] == "target" &&
+                scalar(file, "SELECT COUNT(*) FROM app_links WHERE manual<>1") == 0,
+            "Batch merge flattens every selected group and records manual ownership");
+    auto states = db.reminderStates(day);
+    require(ruleId("target") == targetRule && db.reminderRules().back().threshold == 5000 &&
+                states.size() == 1 && states[0].rule == targetRule && states[0].muted &&
+                states[0].next == 315000 && states[0].token.empty(),
+            "Batch merge preserves the target rule, silence, and longest remaining snooze");
+    require(scalar(file, "SELECT COUNT(*)=5 AND SUM(duration)=15000 AND "
+                         "SUM(CASE WHEN app='target' THEN duration ELSE 0 END)=1000 AND "
+                         "SUM(CASE WHEN app='a' THEN duration ELSE 0 END)=2000 AND "
+                         "SUM(CASE WHEN app='b' THEN duration ELSE 0 END)=3000 AND "
+                         "SUM(CASE WHEN app='c' THEN duration ELSE 0 END)=4000 AND "
+                         "SUM(CASE WHEN app='alias' THEN duration ELSE 0 END)=5000 "
+                         "FROM segments") == 1,
+            "Batch grouping preserves every original interval and source identity");
+    db.mergeApps(std::vector<std::string>{"a", "alias", "b", "target"}, "a");
+    db.mergeApps(std::vector<std::string>{}, "target");
+    states = db.reminderStates(day);
+    require(db.appMappings() == mapping && states.size() == 1 && states[0].next == 315000 &&
+                states[0].muted && states[0].token.empty(),
+            "Retrying a completed batch or an empty selection leaves state unchanged");
+    bool rejected = false;
+    try {
+        db.mergeApps(std::vector<std::string>{"x", "missing", "y"}, "target");
+    } catch (...) {
+        rejected = true;
+    }
+    require(rejected && db.appMappings() == mapping,
+            "A missing batch member rejects the entire selection without partial grouping");
+    rejected = false;
+    try {
+        db.mergeApps(std::vector<std::string>{"x", "y"}, "missing");
+    } catch (...) {
+        rejected = true;
+    }
+    require(rejected && db.appMappings() == mapping,
+            "A missing batch target leaves every source intact");
+    db.setReminder("x", 8000);
+    auto xRule = ruleId("x");
+    db.commit({}, {{xRule, day, 300000, false, false, "x-token"}});
+    auto catalogSize = db.applications().size();
+    rawSql(file, "CREATE TRIGGER fail_batch BEFORE INSERT ON app_links "
+                 "WHEN NEW.app='y' BEGIN SELECT RAISE(ABORT,'injected batch failure'); END;");
+    rejected = false;
+    try {
+        db.mergeApps(std::vector<std::string>{"x", "y"}, "target");
+    } catch (...) {
+        rejected = true;
+    }
+    require(rejected && db.appMappings() == mapping && db.applications().size() == catalogSize &&
+                ruleId("x") == xRule,
+            "A later database failure rolls back earlier mappings, reminders, and catalog changes");
+    states = db.reminderStates(day);
+    auto xState = std::find_if(states.begin(), states.end(),
+                               [&](const auto &state) { return state.rule == xRule; });
+    require(xState != states.end() && xState->token == "x-token" && xState->next == 300000 &&
+                !xState->muted && db.snapshot(day, false, "target").selectedTotal == 15000,
+            "Failed batch restores source occurrence tokens and the target's original usage");
+    rawSql(file, "DROP TRIGGER fail_batch;");
+    db.mergeApps(std::vector<std::string>{"x", "y"}, "target");
+    require(db.appMappings()["x"] == "target" && db.appMappings()["y"] == "target" &&
+                ruleId("x") == 0 && ruleId("target") == targetRule,
+            "Retry after a rolled-back batch merges every requested source exactly once");
+}
+void groupManagementTests(const std::filesystem::path &dir) {
+    auto file = dir / L"group-management.db";
+    constexpr Millis base = 1700000000000;
+    auto day = localDay(base), previous = localDay(base - 86400000);
+    int64_t reminder{};
+    {
+        Storage db(file);
+        for (auto id : {"target", "a", "b", "outside"})
+            db.app({id, wide(id), wide(id) + L".exe"});
+        db.save({{"target", base, 1000},
+                 {"a", base + 1000, 2000},
+                 {"b", base + 3000, 3000},
+                 {"outside", base + 6000, 4000},
+                 {"a", base - 86400000, 5000}});
+        db.renameApp("target", L"Current group");
+        db.renameApp("b", L"Named helper");
+        db.mergeApps(std::vector<std::string>{"a", "b"}, "target");
+        db.setReminder("target", 60000);
+        reminder = db.reminderRules().back().id;
+        db.commit({}, {{reminder, day, 306000, false, true, "before-detach"},
+                       {reminder, previous, 500, true, false, "previous-day"}});
+        auto snapshot = db.snapshot(day, false, "target");
+        require(snapshot.members.size() == 3 && snapshot.members.front().app.id == "target" &&
+                    std::any_of(snapshot.members.begin(), snapshot.members.end(),
+                                [](const auto &member) {
+                                    return member.app.id == "b" &&
+                                           member.app.name == L"Named helper";
+                                }) &&
+                    std::accumulate(snapshot.members.begin(), snapshot.members.end(), Millis{},
+                                    [](Millis total, const auto &member) {
+                                        return total + member.used;
+                                    }) == snapshot.selectedTotal,
+                "Details list each original member, labels, and selected-period usage with primary "
+                "first");
+        db.unmergeApp("target", "a");
+        require(
+            db.appMappings()["a"] == "a" &&
+                scalar(file, "SELECT separate_from='target' FROM apps WHERE id='a'") == 1,
+            "Removing a member restores its independent identity and remembers the former group");
+        auto state = db.reminderStates(day).front();
+        require(db.snapshot(day, false, "target").selectedTotal == 4000 &&
+                    db.snapshot(day, false, "a").selectedTotal == 2000 &&
+                    db.snapshot(day, false).total == 10000 && state.rule == reminder &&
+                    state.next == 304000 && state.muted && !state.notified && state.token.empty(),
+                "Removing a member preserves total time, group reminder, silence, and remaining "
+                "snooze");
+        auto oldState = db.reminderStates(previous).front();
+        require(oldState.next == 1 && oldState.notified && !oldState.muted &&
+                    oldState.token.empty(),
+                "Removing historical usage adjusts each day without turning a positive threshold "
+                "into zero");
+        db.unmergeApp("target", "a");
+        require(db.reminderStates(day).front().next == 304000,
+                "Retrying member removal does not subtract usage twice");
+        bool rejected = false;
+        try {
+            db.unmergeApp("target", "target");
+        } catch (...) {
+            rejected = true;
+        }
+        require(rejected && db.appMappings()["target"] == "target",
+                "The current primary cannot be removed from its own group");
+        rejected = false;
+        try {
+            db.unmergeApp("outside", "a");
+        } catch (...) {
+            rejected = true;
+        }
+        require(rejected && db.appMappings()["a"] == "a",
+                "An independent member cannot be removed again through an unrelated group");
+        require(db.registerApp({"a", L"Refreshed metadata", L"a.exe"},
+                               {"target", L"Automatic group", L"target.exe"}) == "a",
+                "Automatic identity refresh respects an explicit separation");
+        db.commit({}, {{reminder, day, 304000, false, true, "primary-token"}});
+        require(db.setPrimary("target", "b") == "b",
+                "Selecting an existing member changes the group's primary identity");
+        snapshot = db.snapshot(day, false, "target");
+        state = db.reminderStates(day).front();
+        require(snapshot.selected.app.id == "b" && snapshot.selected.app.name == L"Current group" &&
+                    snapshot.selected.app.path == L"b.exe" && snapshot.selectedTotal == 4000 &&
+                    snapshot.members.size() == 2 && snapshot.members.front().app.id == "b" &&
+                    db.appMappings()["target"] == "b",
+                "Primary selection preserves the displayed group name, member usage, and flat "
+                "mappings");
+        require(
+            db.reminderRules().back().id == reminder && db.reminderRules().back().app == "b" &&
+                state.rule == reminder && state.next == 304000 && state.muted &&
+                state.token == "primary-token",
+            "Primary selection moves the same reminder rule without changing its occurrence state");
+        db.setPrimary("target", "b");
+        db.unmergeApp("target", "a");
+        require(db.reminderStates(day).front().token == "primary-token" &&
+                    db.reminderStates(day).front().next == 304000,
+                "Primary selection and removal retries remain idempotent after the root changes");
+        auto mapping = db.appMappings();
+        rejected = false;
+        try {
+            db.setPrimary("b", "outside");
+        } catch (...) {
+            rejected = true;
+        }
+        require(rejected && db.appMappings() == mapping,
+                "Primary selection rejects applications outside the current group");
+        rawSql(file,
+               "CREATE TRIGGER fail_primary BEFORE UPDATE ON reminder_rules "
+               "WHEN NEW.app='target' BEGIN SELECT RAISE(ABORT,'injected primary failure'); END;");
+        rejected = false;
+        try {
+            db.setPrimary("b", "target");
+        } catch (...) {
+            rejected = true;
+        }
+        require(
+            rejected && db.appMappings() == mapping && db.reminderRules().back().app == "b" &&
+                db.reminderStates(day).front().token == "primary-token" &&
+                db.snapshot(day, false, "b").selected.app.name == L"Current group",
+            "Failed primary selection rolls back labels, mappings, and reminder identity together");
+        rawSql(file, "DROP TRIGGER fail_primary;");
+        db.unmergeApp("b", "target");
+        require(db.snapshot(day, false, "b").selectedTotal == 3000 &&
+                    db.snapshot(day, false, "target").selectedTotal == 1000 &&
+                    db.reminderStates(day).front().next == 303000,
+                "After choosing a new primary the former primary can be separated independently");
+        db.mergeApps("a", "b");
+        require(scalar(file, "SELECT separate_from='' FROM apps WHERE id='a'") == 1 &&
+                    db.snapshot(day, false, "b").selectedTotal == 5000,
+                "An explicit new merge clears the member's previous separation choice");
+        db.commit({}, {{reminder, day, 305000, false, true, "rollback-token"}});
+        rawSql(file, "CREATE TRIGGER fail_unmerge BEFORE DELETE ON app_links "
+                     "WHEN OLD.app='a' BEGIN SELECT RAISE(ABORT,'injected removal failure'); END;");
+        rejected = false;
+        try {
+            db.unmergeApp("b", "a");
+        } catch (...) {
+            rejected = true;
+        }
+        state = db.reminderStates(day).front();
+        require(rejected && db.appMappings()["a"] == "b" && state.next == 305000 &&
+                    state.token == "rollback-token" &&
+                    scalar(file, "SELECT separate_from='' FROM apps WHERE id='a'") == 1,
+                "Failed member removal restores the reminder token, threshold, and original "
+                "membership");
+        rawSql(file, "DROP TRIGGER fail_unmerge;");
+        require(
+            scalar(file,
+                   "SELECT COUNT(*)=5 AND SUM(duration)=15000 AND "
+                   "SUM(CASE WHEN app='target' THEN duration ELSE 0 END)=1000 AND "
+                   "SUM(CASE WHEN app='a' THEN duration ELSE 0 END)=7000 AND "
+                   "SUM(CASE WHEN app='b' THEN duration ELSE 0 END)=3000 AND "
+                   "SUM(CASE WHEN app='outside' THEN duration ELSE 0 END)=4000 FROM segments") == 1,
+            "All group-management operations preserve original intervals and source totals");
+    }
+    {
+        Storage db(file);
+        require(db.registerApp({"target", L"Refreshed target", L"target.exe"},
+                               {"b", L"Automatic grouping", L"b.exe"}) == "target",
+                "Independent-member choice survives closing and reopening the database");
+        db.unmergeApp("b", "target");
+        require(db.reminderStates(day).front().token == "rollback-token",
+                "Removal retries after restart do not invalidate a later reminder occurrence");
+        db.clear();
+        auto snapshot = db.snapshot(day, false, "b");
+        require(snapshot.members.size() == 2 && snapshot.members[0].app.id == "b" &&
+                    snapshot.members[1].app.id == "a" && snapshot.members[0].used == 0 &&
+                    snapshot.members[1].used == 0 &&
+                    db.registerApp({"target", L"Target", L"target.exe"},
+                                   {"b", L"Automatic grouping", L"b.exe"}) == "target",
+                "Clearing history retains real members and independent-member choices");
+        db.app({"app:combined", L"Combined", {}});
+        db.mergeApps("b", "app:combined");
+        db.setPrimary("app:combined", "a");
+        snapshot = db.snapshot(day, false, "a");
+        require(snapshot.members.size() == 2 && snapshot.members[0].app.id == "a" &&
+                    snapshot.members[1].app.id == "b",
+                "Member details omit synthetic aliases that never directly recorded usage");
+    }
+    file = dir / L"schema5.db";
+    {
+        Storage db(file);
+        db.app({"source", L"Source", L"source.exe"});
+        db.app({"group", L"Group", L"group.exe"});
+        db.save({{"source", base, 1234}});
+        db.mergeApps("source", "group");
+        db.renameApp("group", L"Custom group");
+    }
+    rawSql(file, "ALTER TABLE apps DROP COLUMN separate_from;PRAGMA user_version=5;");
+    {
+        Storage db(file);
+        require(
+            scalar(file, "PRAGMA user_version") == 6 &&
+                scalar(file, "SELECT COUNT(*) FROM apps WHERE separate_from<>''") == 0 &&
+                db.appMappings()["source"] == "group" &&
+                db.snapshot(day, false, "group").selectedTotal == 1234 &&
+                db.snapshot(day, false, "group").selected.app.name == L"Custom group",
+            "Schema five upgrades to six with existing names, mappings, and raw usage preserved");
+    }
+}
 void migrationTests(const std::filesystem::path &dir) {
     for (int version : {1, 2}) {
         auto file = dir / (L"v" + std::to_wstring(version) + L".db");
@@ -521,7 +820,7 @@ void migrationTests(const std::filesystem::path &dir) {
             rawSql(file, "INSERT INTO app_labels VALUES('b','custom');INSERT INTO app_links "
                          "(app,target) VALUES('c','b');");
         Storage db(file);
-        require(scalar(file, "PRAGMA user_version") == 5, "Schema one and two upgrade to five");
+        require(scalar(file, "PRAGMA user_version") == 6, "Schema one and two upgrade to six");
         require(
             scalar(file, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('limits','notices')") ==
                 0,
@@ -690,7 +989,7 @@ void optimizationTests(const std::filesystem::path &dir) {
                  "user_version=3;");
     {
         Storage db(file);
-        require(scalar(file, "PRAGMA user_version") == 5 && db.snapshot(day, true).total == 168000,
+        require(scalar(file, "PRAGMA user_version") == 6 && db.snapshot(day, true).total == 168000,
                 "Schema three upgrades without discarding history");
         auto state = db.reminderStates(day).front();
         require(state.token == "keep-token" && state.muted && state.next == 12345,
@@ -823,7 +1122,7 @@ void identityStorageTests(const std::filesystem::path &dir) {
            "PRAGMA user_version=4;");
     {
         Storage db(file);
-        require(scalar(file, "PRAGMA user_version") == 5 &&
+        require(scalar(file, "PRAGMA user_version") == 6 &&
                     scalar(file, "SELECT COUNT(*) FROM segments") == 3 &&
                     scalar(file, "SELECT SUM(duration) FROM segments") == 1500,
                 "Schema four upgrade retains every interval and total");
@@ -860,11 +1159,14 @@ int wmain(int argc, wchar_t **argv) {
         boundaryTests(dir);
         storageTests(dir);
         mergeTests(dir);
+        batchMergeTests(dir);
+        groupManagementTests(dir);
         migrationTests(dir);
         optimizationTests(dir);
         identityStorageTests(dir);
         // Files are all fixed names in this process's test directory; never touch a user profile.
-        for (auto name : {L"storage.db", L"merge.db", L"v1.db", L"v2.db", L"midnight.db"})
+        for (auto name : {L"storage.db", L"merge.db", L"batch-merge.db", L"group-management.db",
+                          L"schema5.db", L"v1.db", L"v2.db", L"midnight.db"})
             std::filesystem::remove(dir / name);
         std::filesystem::remove(dir);
         std::cout << "PASS: " << checks << " checks\n";

@@ -29,7 +29,9 @@ struct Command {
         Clear,
         Stop,
         Rename,
-        Merge
+        Merge,
+        Unmerge,
+        SetPrimary
     } kind{Observe};
     Sample sample;
     std::string app, day;
@@ -42,6 +44,8 @@ struct Command {
     uint64_t request{};
     std::vector<std::string> iconApps;
     size_t iconCount{16};
+    std::string mergeFor;
+    std::vector<std::string> mergeApps;
 };
 class AppResolver {
   public:
@@ -49,6 +53,8 @@ class AppResolver {
     ~AppResolver();
     ResolvedApp resolve(HWND window, DWORD pid);
     ResolvedApp identify(const AppInfo &app);
+    std::vector<MergeCandidate> mergeCandidates(const std::vector<AppInfo> &catalog,
+                                                const std::string &current);
 
   private:
     struct Impl;

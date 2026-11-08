@@ -38,18 +38,19 @@ Storage::Storage(const std::filesystem::path &path) {
             Statement version(db_, "PRAGMA user_version");
             if (version.step())
                 schema = static_cast<int>(version.integer(0));
-            if (schema > 5)
+            if (schema > 6)
                 throw std::runtime_error("This database requires a newer TimeTrace version");
         }
         execSql(db_, "PRAGMA journal_mode=WAL;PRAGMA synchronous=FULL;PRAGMA foreign_keys=ON;"
                      "PRAGMA cache_size=-1024;");
-        if (schema == 5)
+        if (schema == 6)
             return;
         Transaction transaction(db_);
         execSql(
             db_,
             "CREATE TABLE IF NOT EXISTS apps(id TEXT PRIMARY KEY,name TEXT NOT NULL,path TEXT NOT "
-            "NULL,has_usage INTEGER NOT NULL DEFAULT 0 CHECK(has_usage IN (0,1)));"
+            "NULL,has_usage INTEGER NOT NULL DEFAULT 0 CHECK(has_usage IN (0,1)),"
+            "separate_from TEXT NOT NULL DEFAULT '');"
             "CREATE TABLE IF NOT EXISTS segments(id INTEGER PRIMARY KEY,app TEXT NOT NULL "
             "REFERENCES "
             "apps(id),start INTEGER NOT NULL,end INTEGER NOT NULL,duration INTEGER NOT NULL "
@@ -100,6 +101,8 @@ Storage::Storage(const std::filesystem::path &path) {
         if (!hasColumn(db_, "apps", "has_usage"))
             execSql(db_, "ALTER TABLE apps ADD COLUMN has_usage INTEGER NOT NULL DEFAULT 0 "
                          "CHECK(has_usage IN (0,1));");
+        if (!hasColumn(db_, "apps", "separate_from"))
+            execSql(db_, "ALTER TABLE apps ADD COLUMN separate_from TEXT NOT NULL DEFAULT '';");
         if (!hasColumn(db_, "app_links", "manual"))
             execSql(db_, "ALTER TABLE app_links ADD COLUMN manual INTEGER NOT NULL DEFAULT 1 "
                          "CHECK(manual IN (0,1));");
@@ -116,7 +119,7 @@ Storage::Storage(const std::filesystem::path &path) {
         }
         for (const auto &id : unknown)
             autoLink(id, {unknownId, L"未识别应用", {}});
-        execSql(db_, "PRAGMA user_version=5;");
+        execSql(db_, "PRAGMA user_version=6;");
         transaction.commit();
     } catch (...) {
         sqlite3_close(db_);
@@ -174,7 +177,8 @@ bool Storage::autoLink(const std::string &source, const AppInfo &representative)
     Statement protectedApp(
         db_, "SELECT 1 WHERE EXISTS(SELECT 1 FROM app_links WHERE app=?1 AND manual=1) "
              "OR EXISTS(SELECT 1 FROM app_links WHERE target=?1 AND manual=1) "
-             "OR EXISTS(SELECT 1 FROM app_labels WHERE app=?1 OR app=?2)");
+             "OR EXISTS(SELECT 1 FROM app_labels WHERE app=?1 OR app=?2) "
+             "OR EXISTS(SELECT 1 FROM apps WHERE id=?1 AND separate_from<>'')");
     protectedApp.text(1, source);
     protectedApp.text(2, current);
     if (protectedApp.step())
@@ -310,29 +314,133 @@ void Storage::renameApp(const std::string &app, const std::wstring &value) {
     catalog_.reset();
 }
 void Storage::mergeApps(const std::string &source, const std::string &target) {
-    auto from = canonicalId(source), to = canonicalId(target);
-    if (from.empty() || to.empty())
-        throw std::runtime_error("Application does not exist");
-    if (from == to)
-        return;
+    mergeApps(std::vector<std::string>{source}, target);
+}
+void Storage::mergeApps(const std::vector<std::string> &sources, const std::string &target) {
     Transaction transaction(db_);
-    mergeReminders(from, to);
+    auto to = canonicalId(target);
+    if (to.empty())
+        throw std::runtime_error("Application does not exist");
+    std::vector<std::string> roots;
+    for (const auto &source : sources) {
+        auto from = canonicalId(source);
+        if (from.empty())
+            throw std::runtime_error("Application does not exist");
+        if (from != to && std::find(roots.begin(), roots.end(), from) == roots.end())
+            roots.push_back(std::move(from));
+    }
+    if (roots.empty()) {
+        transaction.commit();
+        return;
+    }
     // Flatten groups, so aggregation never needs recursive traversal in the background.
     Statement members(db_, "UPDATE app_links SET target=?1,manual=1 WHERE target=?2");
-    members.text(1, to);
-    members.text(2, from);
-    members.step();
     Statement link(db_, "INSERT INTO app_links(app,target,manual) VALUES(?1,?2,1)");
-    link.text(1, from);
-    link.text(2, to);
-    link.step();
     Statement used(db_, "UPDATE apps SET has_usage=1 WHERE id=?1 AND has_usage=0 AND "
                         "EXISTS(SELECT 1 FROM apps WHERE id=?2 AND has_usage=1)");
-    used.text(1, to);
-    used.text(2, from);
-    used.step();
+    Statement joined(db_, "UPDATE apps SET separate_from='' WHERE id=?1 OR id IN "
+                          "(SELECT app FROM app_links WHERE target=?1)");
+    for (const auto &from : roots) {
+        mergeReminders(from, to);
+        joined.reset();
+        joined.text(1, from);
+        joined.step();
+        members.reset();
+        members.text(1, to);
+        members.text(2, from);
+        members.step();
+        link.reset();
+        link.text(1, from);
+        link.text(2, to);
+        link.step();
+        used.reset();
+        used.text(1, to);
+        used.text(2, from);
+        used.step();
+    }
     transaction.commit();
     catalog_.reset();
+}
+void Storage::unmergeApp(const std::string &group, const std::string &member) {
+    Transaction transaction(db_);
+    auto root = canonicalId(group), current = canonicalId(member);
+    if (root.empty() || current.empty())
+        throw std::runtime_error("Application does not exist");
+    if (member == root)
+        throw std::runtime_error("Choose another primary application before removing this member");
+    if (current != root) {
+        Statement previous(db_, "SELECT separate_from FROM apps WHERE id=?1");
+        previous.text(1, member);
+        if (previous.step() && current == member && !previous.text(0).empty() &&
+            canonicalId(previous.text(0)) == root) {
+            transaction.commit();
+            return;
+        }
+        throw std::runtime_error("Application is not a member of this group");
+    }
+    Statement state(db_, "UPDATE reminder_states SET next=CASE WHEN next>0 THEN MAX(1,next-"
+                         "COALESCE((SELECT SUM(duration) FROM segments WHERE app=?1 AND "
+                         "day=reminder_states.day),0)) ELSE next END,token='' WHERE rule IN "
+                         "(SELECT id FROM reminder_rules WHERE kind=1 AND app=?2)");
+    state.text(1, member);
+    state.text(2, root);
+    state.step();
+    Statement remove(db_, "DELETE FROM app_links WHERE app=?1 AND target=?2");
+    remove.text(1, member);
+    remove.text(2, root);
+    remove.step();
+    Statement separate(db_, "UPDATE apps SET separate_from=?1 WHERE id=?2");
+    separate.text(1, root);
+    separate.text(2, member);
+    separate.step();
+    Statement usage(db_, "UPDATE apps SET has_usage=EXISTS(SELECT 1 FROM segments WHERE "
+                         "app=apps.id) OR EXISTS(SELECT 1 FROM app_links m JOIN segments s "
+                         "ON s.app=m.app WHERE m.target=apps.id) WHERE id=?1 OR id=?2");
+    usage.text(1, root);
+    usage.text(2, member);
+    usage.step();
+    transaction.commit();
+    catalog_.reset();
+}
+std::string Storage::setPrimary(const std::string &group, const std::string &member) {
+    Transaction transaction(db_);
+    auto root = canonicalId(group);
+    if (root.empty() || canonicalId(member) != root)
+        throw std::runtime_error("Application is not a member of this group");
+    if (member == root) {
+        transaction.commit();
+        return root;
+    }
+    Statement label(db_, "INSERT INTO app_labels(app,name) SELECT ?1,COALESCE(n.name,a.name) "
+                         "FROM apps a LEFT JOIN app_labels n ON n.app=a.id WHERE a.id=?2 "
+                         "ON CONFLICT(app) DO UPDATE SET name=excluded.name");
+    label.text(1, member);
+    label.text(2, root);
+    label.step();
+    Statement remove(db_, "DELETE FROM app_links WHERE app=?1 AND target=?2");
+    remove.text(1, member);
+    remove.text(2, root);
+    remove.step();
+    Statement members(db_, "UPDATE app_links SET target=?1,manual=1 WHERE target=?2");
+    members.text(1, member);
+    members.text(2, root);
+    members.step();
+    Statement former(db_, "INSERT INTO app_links(app,target,manual) VALUES(?1,?2,1)");
+    former.text(1, root);
+    former.text(2, member);
+    former.step();
+    Statement rule(db_, "UPDATE reminder_rules SET app=?1 WHERE kind=1 AND app=?2");
+    rule.text(1, member);
+    rule.text(2, root);
+    rule.step();
+    Statement usage(db_, "UPDATE apps SET has_usage=1 WHERE id=?1 AND "
+                         "EXISTS(SELECT 1 FROM apps WHERE id=?2 AND has_usage=1)");
+    usage.text(1, member);
+    usage.text(2, root);
+    usage.step();
+    transaction.commit();
+    catalog_.reset();
+    return member;
 }
 Snapshot Storage::snapshot(const std::string &day, bool weekly, const std::string &selected) {
     Snapshot out;
@@ -389,6 +497,22 @@ Snapshot Storage::snapshot(const std::string &day, bool weekly, const std::strin
                                    [&](const AppInfo &app) { return app.id == selection; });
         if (chosen != out.catalog.end())
             out.selected = {*chosen, out.selectedTotal};
+        Statement members(
+            db_, "WITH usage AS (SELECT app,SUM(duration) used FROM segments WHERE day>=?1 "
+                 "AND day<?2 GROUP BY app) SELECT "
+                 "a.id,COALESCE(n.name,a.name),a.path,COALESCE(u.used,0),"
+                 "EXISTS(SELECT 1 FROM segments WHERE app=a.id) FROM apps a "
+                 "LEFT JOIN usage u ON u.app=a.id LEFT JOIN app_links m ON m.app=a.id "
+                 "LEFT JOIN app_labels n ON n.app=a.id WHERE a.id=?3 OR (m.target=?3 AND "
+                 "(a.id NOT LIKE 'app:%' OR EXISTS(SELECT 1 FROM segments WHERE app=a.id))) "
+                 "ORDER BY a.id<>?3,COALESCE(n.name,a.name) COLLATE NOCASE,a.id");
+        members.text(1, from);
+        members.text(2, to);
+        members.text(3, selection);
+        while (members.step())
+            out.members.push_back({{members.text(0), wide(members.text(1)), wide(members.text(2)),
+                                    members.integer(4) != 0},
+                                   members.integer(3)});
     }
     return out;
 }

@@ -1,5 +1,6 @@
 #include "identity.h"
 #include <windows.h>
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
 using namespace tt;
@@ -150,6 +151,90 @@ int main() {
         require(sharedHost.identify(source(shellPath.c_str()), metadata(L"Windows", L"Microsoft"))
                     .representative.id.empty(),
                 "folder shortcuts cannot rename a shared Windows host");
+        std::vector<AppInfo> mergeApps{
+            {"app:install:suite", L"Suite", L"C:\\Apps\\Suite\\Suite.exe"},
+            {"other", L"Other", L"C:\\Apps\\Other\\app.exe"},
+            {"old-helper", L"Helper", L"C:\\Apps\\Suite\\1.0\\helper.exe"},
+            {"game", L"Game client", L"C:\\Apps\\Suite\\Game\\Binaries\\client.exe"},
+            {"nested", L"Editor helper", L"C:\\Apps\\Suite\\Editor\\bin\\helper.exe"},
+            {"prefix", L"Prefix", L"C:\\Apps\\SuiteOther\\helper.exe"},
+            {"app:install:separate", L"Separate", L"C:\\Apps\\Suite\\separate.exe"},
+            {"aumid:separate", L"Packaged application", L"C:\\Apps\\Suite\\host.exe"},
+            {"unused", L"Unused", L"C:\\Apps\\Suite\\unused.exe", false},
+            {"app:unidentified", L"Unknown", {}}};
+        auto suggestions = catalog.mergeCandidates(mergeApps, "app:install:suite");
+        require(suggestions.size() == 7,
+                "Merge choices exclude current, unidentified and unused applications");
+        require(suggestions[0].app.id == "old-helper" && suggestions[0].related &&
+                    suggestions[1].app.id == "game" && suggestions[1].related,
+                "Concrete install directory prioritizes old versions and unsigned clients");
+        require(
+            std::count_if(suggestions.begin(), suggestions.end(),
+                          [](const auto &candidate) { return candidate.related; }) == 2,
+            "Nested products, explicit identities and directory prefixes stay ordinary choices");
+        require(suggestions[2].app.id == "other" && suggestions[2].app.path == mergeApps[1].path,
+                "Unrelated choices retain original paths and stable order");
+        auto rawMain = source(L"C:\\Apps\\Suite\\Suite.exe");
+        auto rawCatalog = mergeApps;
+        rawCatalog[0] = rawMain;
+        require(catalog.mergeCandidates(rawCatalog, rawMain.id).front().app.id == "old-helper",
+                "Raw main executable reuses its registered installation directory");
+        auto unchangedGame = catalog.identify(
+            source(L"C:\\Apps\\Suite\\Game\\Binaries\\client.exe"), metadata(L"UE4", L""));
+        require(unchangedGame.representative.id.empty(),
+                "Directory suggestions never change automatic application attribution");
+        std::vector<AppInfo> unknownApps{
+            {"current", L"App", L"C:\\Portable\\App\\main.exe"},
+            {"peer", L"Peer", L"C:\\Portable\\App\\peer.exe"},
+            {"subfolder", L"Child", L"C:\\Portable\\App\\Other\\child.exe"}};
+        auto unknownSuggestions = catalog.mergeCandidates(unknownApps, "current");
+        require(
+            unknownSuggestions.size() == 2 && unknownSuggestions[0].related &&
+                !unknownSuggestions[1].related,
+            "Unregistered paths suggest only direct siblings, without widening directory scope");
+        auto pwaSuggestions =
+            catalog.mergeCandidates({{"app:aumid:Pwa.One", L"Web app", L"C:\\Browser\\browser.exe"},
+                                     {"browser-helper", L"Helper", L"C:\\Browser\\helper.exe"}},
+                                    "app:aumid:Pwa.One");
+        require(pwaSuggestions.size() == 1 && !pwaSuggestions[0].related,
+                "A browser app cannot suggest sibling programs from its shared host directory");
+        auto nativeBrowserSuggestions =
+            catalog.mergeCandidates({{"browser", L"Browser", L"C:\\Browser\\browser.exe"},
+                                     {"browser-helper", L"Helper", L"C:\\Browser\\helper.exe"}},
+                                    "browser");
+        require(!nativeBrowserSuggestions[0].related,
+                "Known shared browser hosts do not provide directory-wide merge suggestions");
+        auto systemSuggestions = sharedHost.mergeCandidates(
+            {{"shell", L"Explorer", shellPath},
+             {"system-peer", L"Peer", std::wstring(windowsDirectory) + L"\\peer.exe"}},
+            "shell");
+        require(systemSuggestions.size() == 1 && !systemSuggestions[0].related,
+                "System executables never suggest shared system-directory records");
+        auto missingSuggestions = catalog.mergeCandidates(mergeApps, "missing");
+        require(std::none_of(missingSuggestions.begin(), missingSuggestions.end(),
+                             [](const auto &candidate) { return candidate.related; }),
+                "Missing selection does not guess a directory");
+        auto namedClient = mergeApps;
+        namedClient[3].name = L"Suite";
+        auto namedClientSuggestions = catalog.mergeCandidates(namedClient, "game");
+        require(namedClientSuggestions[0].app.id == "app:install:suite" &&
+                    namedClientSuggestions[0].related,
+                "A same-name client inside a concrete install root can suggest its launcher");
+        require(std::count_if(namedClientSuggestions.begin(), namedClientSuggestions.end(),
+                              [](const auto &candidate) { return candidate.related; }) == 2,
+                "Same-name directory scope retains old helper while excluding nested products");
+        auto merelySimilar = mergeApps;
+        merelySimilar[3].name = L"Suite Helper";
+        auto merelySimilarSuggestions = catalog.mergeCandidates(merelySimilar, "game");
+        require(std::none_of(merelySimilarSuggestions.begin(), merelySimilarSuggestions.end(),
+                             [](const auto &candidate) { return candidate.related; }),
+                "Similar names cannot widen an unregistered client's directory scope");
+        auto nestedNamed = mergeApps;
+        nestedNamed[4].name = L"Suite";
+        auto nestedNamedSuggestions = catalog.mergeCandidates(nestedNamed, "nested");
+        require(std::none_of(nestedNamedSuggestions.begin(), nestedNamedSuggestions.end(),
+                             [](const auto &candidate) { return candidate.related; }),
+                "A matching parent product name cannot cross a known nested product boundary");
         std::cout << "PASS: " << checks << " identity checks\n";
         return 0;
     } catch (const std::exception &error) {

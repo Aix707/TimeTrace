@@ -1,0 +1,14 @@
+{
+  "original_intervals": 6530,
+  "target_schema": 6,
+  "all_original_intervals_identical": true,
+  "original_labels_preserved": true,
+  "manual_groups_preserved": true,
+  "integrity_ok": true,
+  "foreign_keys_ok": true,
+  "version": "1.3.1",
+  "binary_sha256": "471DE005DACFCBB71C4093B3976209B790C970510A9E4C13526A3D42AA520110",
+  "installed_bytes": 1282202.0,
+  "primary_correction_verified": true,
+  "passed": true
+}

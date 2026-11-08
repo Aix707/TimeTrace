@@ -6,6 +6,7 @@
 #include <cmath>
 #include <dwmapi.h>
 #include <shellapi.h>
+#include <utility>
 #include <wincodec.h>
 #include <windowsx.h>
 
@@ -38,6 +39,7 @@ void Ui::factories() {
 }
 void Ui::show(bool reminders) {
     if (reminders && page_ != 1) {
+        pendingMerge_.clear();
         page_ = 1;
         scroll_ = 0;
     }
@@ -92,21 +94,25 @@ void Ui::update(Snapshot s) {
     snapshot_ = std::move(s);
     if (page_ == 3 && !snapshot_.selected.app.id.empty())
         selected_ = snapshot_.selected.app.id;
+    std::string readyMerge;
+    if (!pendingMerge_.empty() && snapshot_.mergeFor == pendingMerge_)
+        readyMerge = std::exchange(pendingMerge_, {});
     std::erase_if(paintCache_.icons, [](const auto &item) { return item.first.use_count() == 1; });
     refreshVisibleIcons();
     if (visible())
         InvalidateRect(window_, nullptr, FALSE);
+    if (!readyMerge.empty())
+        promptApp(readyMerge, true);
 }
 int Ui::listCapacity(float height) const {
     if (page_ == 3)
         return 1;
     if (page_ == 2)
         return 0;
-    auto capacity = page_ == 1
-                        ? (height - size::reminderListTop - size::listFooter) / size::reminderRow
-                        : (height - size::overviewBottom - height * .60f -
-                           size::overviewListGap) /
-                              size::row;
+    auto capacity =
+        page_ == 1
+            ? (height - size::reminderListTop - size::listFooter) / size::reminderRow
+            : (height - size::overviewBottom - height * .60f - size::overviewListGap) / size::row;
     return std::clamp(static_cast<int>(capacity), 1, 64);
 }
 std::vector<std::string> Ui::visibleIconApps() const {
@@ -118,8 +124,7 @@ std::vector<std::string> Ui::visibleIconApps() const {
             apps.push_back(selected_);
         return apps;
     }
-    if (page_ == 2 ||
-        (page_ == 0 && (snapshot_.day != day_ || snapshot_.weekly != weekly_)))
+    if (page_ == 2 || (page_ == 0 && (snapshot_.day != day_ || snapshot_.weekly != weekly_)))
         return apps;
     RECT client{};
     GetClientRect(window_, &client);
@@ -146,8 +151,8 @@ void Ui::refreshVisibleIcons() {
         return;
     RECT client{};
     GetClientRect(window_, &client);
-    auto capacity = static_cast<size_t>(
-        listCapacity(client.bottom * 96.0f / GetDpiForWindow(window_)));
+    auto capacity =
+        static_cast<size_t>(listCapacity(client.bottom * 96.0f / GetDpiForWindow(window_)));
     if (capacity != requestedIconCount_ || visibleIconApps() != requestedIconApps_)
         request();
 }
@@ -161,12 +166,13 @@ void Ui::request() {
     c.request = ++request_;
     c.day = day_;
     c.weekly = weekly_;
+    c.mergeFor = pendingMerge_;
     if (page_ == 3)
         c.app = selected_;
     RECT client{};
     GetClientRect(window_, &client);
-    c.iconCount = static_cast<size_t>(
-        listCapacity(client.bottom * 96.0f / GetDpiForWindow(window_)));
+    c.iconCount =
+        static_cast<size_t>(listCapacity(client.bottom * 96.0f / GetDpiForWindow(window_)));
     c.iconApps = visibleIconApps();
     requestedIconApps_ = c.iconApps;
     requestedIconCount_ = c.iconCount;
@@ -372,28 +378,59 @@ void Ui::promptReminder(const std::string &app, bool device, bool chooseApp) {
     request();
 }
 void Ui::promptApp(const std::string &app, bool merge) {
+    if (merge && snapshot_.mergeFor != app) {
+        pendingMerge_ = app;
+        request();
+        return;
+    }
     Prompt p;
     p.kind = merge ? Prompt::Merge : Prompt::Rename;
-    if (snapshot_.selected.app.id == app)
+    if (snapshot_.selected.app.id == app) {
         p.appName = snapshot_.selected.app.name;
-    else
+        p.appPath = snapshot_.selected.app.path;
+        p.baseUsed = snapshot_.selectedTotal;
+    } else
         for (const auto &candidate : snapshot_.catalog)
-            if (candidate.id == app)
+            if (candidate.id == app) {
                 p.appName = candidate.name;
+                p.appPath = candidate.path;
+            }
     if (merge) {
-        for (const auto &candidate : snapshot_.catalog)
-            if (candidate.id != app && candidate.id != "app:unidentified" && candidate.hasUsage)
-                p.choices.push_back(candidate);
-        if (p.choices.empty())
+        p.mergeCandidates = std::move(snapshot_.mergeCandidates);
+        snapshot_.mergeFor.clear();
+        if (p.mergeCandidates.empty()) {
+            MessageBoxW(window_, L"没有可合并的使用记录。", L"合并记录", MB_ICONINFORMATION);
             return;
+        }
     }
     if (!showPrompt(window_, p) || !service_)
         return;
     Command command;
     command.kind = merge ? Command::Merge : Command::Rename;
-    command.app = merge ? p.target : app;
+    command.app = merge ? std::string{} : app;
+    command.mergeApps = std::move(p.targets);
     command.name = p.text;
     command.target = merge ? app : std::string{};
+    service_->send(std::move(command));
+    request();
+}
+void Ui::promptMembers(const std::string &app) {
+    if (snapshot_.members.empty() || snapshot_.selected.app.id != app)
+        return;
+    Prompt p;
+    p.kind = Prompt::GroupMembers;
+    p.appName = snapshot_.selected.app.name;
+    p.appPath = snapshot_.selected.app.path;
+    p.baseUsed = snapshot_.selectedTotal;
+    p.members = snapshot_.members;
+    if (!showPrompt(window_, p) || !service_)
+        return;
+    Command command;
+    command.kind = p.result == 107 ? Command::Unmerge : Command::SetPrimary;
+    command.app = app;
+    command.target = p.target;
+    if (command.kind == Command::SetPrimary)
+        selected_ = p.target;
     service_->send(std::move(command));
     request();
 }
@@ -402,6 +439,8 @@ void Ui::act(const Hit &h) {
         return;
     hover_ = -1;
     focus_ = -1;
+    if (h.action != 213)
+        pendingMerge_.clear();
     if (h.action >= 100 && h.action <= 102) {
         page_ = h.action - 100;
         scroll_ = 0;
@@ -458,6 +497,8 @@ void Ui::act(const Hit &h) {
             }
     } else if (h.action == 212 || h.action == 213) {
         promptApp(h.app, h.action == 213);
+    } else if (h.action == 217) {
+        promptMembers(h.app);
     } else if (h.action == 211) {
         selected_ = h.app;
         page_ = 3;
@@ -711,6 +752,7 @@ LRESULT CALLBACK Ui::proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     case WM_DESTROY:
         self->window_ = nullptr;
+        self->pendingMerge_.clear();
         self->paintCache_ = {};
         self->snapshot_ = {};
         self->requestedIconApps_.clear();

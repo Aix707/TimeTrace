@@ -20,7 +20,7 @@ with sqlite3.connect(copy) as db:
     after={t:rows(db,t,'id,name,path' if t=='apps' else 'app,target' if t=='app_links' else '*') for t in before}
     schema=db.execute('pragma user_version').fetchone()[0]
     unchanged={t:before[t]==after[t] for t in before}
-    # Schema 5 may add an unidentified representative, retaining every raw source.
+    # Migration may add an unidentified representative, retaining every raw source.
     unchanged['apps']=all(row in after['apps'] for row in before['apps'])
     unchanged['app_links']=all(row in after['app_links'] for row in before['app_links'])
     totals_equal=total==db.execute('select coalesce(sum(duration),0) from segments').fetchone()[0]
@@ -28,6 +28,6 @@ with sqlite3.connect(copy) as db:
     legacy_ok=version>=3 or all((app,duration) in rules for app,duration in thresholds)
     device=db.execute('select duration,enabled from reminder_rules where kind=0').fetchone()
 result={'source_opened_read_only':True,'source_schema':version,'target_schema':schema,'applications':len(before['apps']),'intervals':len(before['segments']),'recorded_milliseconds':total,'unchanged_tables':unchanged,'segments_sha256_before':digest(before['segments']),'segments_sha256_after':digest(after['segments']),'total_unchanged':totals_equal,'legacy_thresholds_preserved':legacy_ok,'new_device_disabled_sixty_minutes':device==(3600000,0)}
-result['passed']=schema==5 and all(unchanged.values()) and totals_equal and legacy_ok and (version>=3 or result['new_device_disabled_sixty_minutes'])
+result['passed']=schema==6 and all(unchanged.values()) and totals_equal and legacy_ok and (version>=3 or result['new_device_disabled_sixty_minutes'])
 (folder/'result.json').write_text(json.dumps(result,indent=2),encoding='utf-8');print(json.dumps(result,indent=2))
 raise SystemExit(0 if result['passed'] else 1)

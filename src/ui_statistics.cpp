@@ -159,6 +159,8 @@ void Ui::drawDetail(ui::Canvas &c, float x, float right, float height) {
     c.line(x, reminderTop - size::gap, right, reminderTop - size::gap, theme::separator);
     c.text(L"应用提醒", {x, reminderTop, right, reminderTop + 32}, size::title, theme::text, 600);
     float rowTop = reminderTop + 40;
+    float barTop = height - size::detailBarBottom - size::control;
+    float membersTop = barTop - size::control - 16;
     c.card({x, rowTop, right, rowTop + size::preferenceRow});
     auto view = reminder(selected_);
     if (view) {
@@ -169,15 +171,28 @@ void Ui::drawDetail(ui::Canvas &c, float x, float right, float height) {
                DWRITE_TEXT_ALIGNMENT_CENTER);
         appReminderRow(c, *view, x, right, rowTop, false);
         if (!view->state.token.empty())
-            reminderActions(c, right - size::inset, rowTop + size::preferenceRow + size::gap,
-                            selected_);
+            reminderActions(
+                c, right - size::inset,
+                std::min(rowTop + size::preferenceRow + size::gap, membersTop - size::control - 4),
+                selected_);
     } else if (selected_ != "app:unidentified") {
         c.rowText(L"尚未设置", {}, x + size::inset, rowTop, right - 180);
         button(c, ui::controlRect(right - size::inset, rowTop + 22), L"添加提醒", 207, selected_,
                true);
     } else
         c.rowText(L"此项暂无法设置提醒", {}, x + size::inset, rowTop, right - size::inset);
-    float barTop = height - size::detailBarBottom - size::control;
+    c.text(L"合并成员", {x, membersTop, x + 104, membersTop + size::control}, size::body,
+           theme::text, 600);
+    std::wstring members;
+    for (size_t i = 1; i < snapshot_.members.size(); ++i)
+        members += (members.empty() ? L"" : L"、") + snapshot_.members[i].app.name;
+    c.text(
+        members.empty() ? L"尚未合并" : members,
+        {x + 112, membersTop, right - size::compactWidth - size::gap, membersTop + size::control},
+        size::body, theme::secondary);
+    if (!snapshot_.members.empty())
+        linkButton(c, ui::controlRect(right, membersTop, size::compactWidth), L"管理", 217,
+                   selected_);
     c.line(x, barTop - 16, right, barTop - 16, theme::separator);
     const AppRow *chosen = snapshot_.selected.app.id == selected_ ? &snapshot_.selected : nullptr;
     AppRow fallback;

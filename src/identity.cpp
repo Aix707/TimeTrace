@@ -31,6 +31,11 @@ bool inside(const std::wstring &path, const std::wstring &root) {
     return !root.empty() && path.size() > root.size() && path.compare(0, root.size(), root) == 0 &&
            path[root.size()] == L'\\';
 }
+bool hasTarget(const IdentityProduct &product, const std::wstring &path) {
+    return !path.empty() &&
+           (product.primaryPath == path || std::find(product.targets.begin(), product.targets.end(),
+                                                     path) != product.targets.end());
+}
 bool specificRoot(const std::wstring &root) {
     if (root.size() < 6)
         return false;
@@ -381,9 +386,7 @@ ResolvedApp IdentityCatalog::identify(const AppInfo &source, const IdentityConte
     int best{};
     bool ambiguous{};
     for (auto &product : impl_->products) {
-        bool exact = path == product.primaryPath ||
-                     std::find(product.targets.begin(), product.targets.end(), path) !=
-                         product.targets.end();
+        bool exact = hasTarget(product, path);
         int score{};
         if (exact) {
             score = 100000;
@@ -469,6 +472,99 @@ ResolvedApp IdentityCatalog::identify(const AppInfo &source, const IdentityConte
                              selected->primaryPath.empty() ? source.path : selected->primaryPath};
     result.evidence =
         best == 100000 ? "registered-or-shortcut-target" : "install-root-and-metadata";
+    return result;
+}
+std::vector<MergeCandidate> IdentityCatalog::mergeCandidates(const std::vector<AppInfo> &catalog,
+                                                             const std::string &current) const {
+    auto chosen = std::find_if(catalog.begin(), catalog.end(),
+                               [&](const auto &app) { return app.id == current; });
+    std::wstring root;
+    const IdentityProduct *owner{};
+    bool recursive{};
+    if (chosen != catalog.end() && !chosen->id.starts_with("aumid:") &&
+        !chosen->id.starts_with("app:aumid:")) {
+        auto path = identityPath(chosen->path);
+        for (const auto &product : impl_->products)
+            if (chosen->id == "app:install:" + product.key) {
+                owner = &product;
+                break;
+            }
+        if (!owner)
+            for (const auto &product : impl_->products)
+                if (hasTarget(product, path) &&
+                    (!owner || product.root.size() > owner->root.size()))
+                    owner = &product;
+        if (!owner)
+            for (const auto &product : impl_->products) {
+                if (product.key.starts_with("shortcut:") || !product.appId.empty() ||
+                    !specificRoot(product.root) || !inside(path, product.root) ||
+                    genericName(chosen->name) || folded(chosen->name) != folded(product.name))
+                    continue;
+                bool nestedProduct = std::any_of(
+                    impl_->products.begin(), impl_->products.end(), [&](const auto &other) {
+                        return other.key != product.key && specificRoot(other.root) &&
+                               inside(other.root, product.root) && inside(path, other.root);
+                    });
+                if (!nestedProduct && (!owner || product.root.size() > owner->root.size()))
+                    owner = &product;
+            }
+        bool shared =
+            std::any_of(impl_->products.begin(), impl_->products.end(), [&](const auto &product) {
+                return !product.appId.empty() && hasTarget(product, path);
+            });
+        if (!shared && (!owner || owner->appId.empty())) {
+            if (owner && specificRoot(owner->root)) {
+                root = owner->root;
+                recursive = true;
+            } else if (owner) {
+                // A launch shortcut can identify a product whose registered icon is
+                // an uninstaller. Reuse that product's installation directory.
+                for (const auto &product : impl_->products)
+                    if (!product.key.starts_with("shortcut:") && product.appId.empty() &&
+                        specificRoot(product.root) && inside(path, product.root) &&
+                        sameProduct(owner->name, product.name) &&
+                        product.root.size() > root.size()) {
+                        root = product.root;
+                        recursive = true;
+                    }
+            }
+            if (root.empty() && !path.empty())
+                root = std::filesystem::path(path).parent_path().wstring();
+        }
+        wchar_t windowsDirectory[MAX_PATH]{};
+        if (!specificRoot(root) || (GetWindowsDirectoryW(windowsDirectory, MAX_PATH) &&
+                                    inside(path, identityPath(windowsDirectory))))
+            root.clear();
+    }
+    std::vector<MergeCandidate> result;
+    for (const auto &app : catalog) {
+        if (app.id == current || app.id == "app:unidentified" || !app.hasUsage)
+            continue;
+        auto path = identityPath(app.path);
+        bool related = !root.empty() && !path.empty() &&
+                       (recursive ? inside(path, root)
+                                  : std::filesystem::path(path).parent_path().wstring() == root);
+        // Known application identities and explicit product boundaries remain separate
+        // choices even when a shared parent folder contains their executables.
+        bool sameProductIdentity = owner && app.id == "app:install:" + owner->key;
+        if (related && !sameProductIdentity &&
+            (app.id.starts_with("app:") || app.id.starts_with("aumid:")))
+            related = false;
+        if (related)
+            related = std::none_of(
+                impl_->products.begin(), impl_->products.end(), [&](const auto &product) {
+                    if (owner && product.key == owner->key)
+                        return false;
+                    bool sameHost = owner && product.primaryPath == owner->primaryPath &&
+                                    product.appId == owner->appId;
+                    return (!sameHost && hasTarget(product, path)) ||
+                           (specificRoot(product.root) && product.root != root &&
+                            inside(product.root, root) && inside(path, product.root));
+                });
+        result.push_back({app, related});
+    }
+    std::stable_sort(result.begin(), result.end(),
+                     [](const auto &a, const auto &b) { return a.related > b.related; });
     return result;
 }
 } // namespace tt

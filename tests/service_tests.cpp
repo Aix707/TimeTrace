@@ -54,10 +54,12 @@ void observe(Service &service, HWND host, Millis tick, Millis utc) {
     command.sample = {tick, utc, tick, host, GetCurrentProcessId()};
     service.send(command);
 }
-Snapshot query(Service &service, HWND host, const std::string &day, uint64_t request) {
+Snapshot query(Service &service, HWND host, const std::string &day, uint64_t request,
+               const std::string &selected = {}) {
     Command command{Command::Query};
     command.day = day;
     command.request = request;
+    command.app = selected;
     service.send(command);
     return waitSnapshot(host, request);
 }
@@ -199,14 +201,26 @@ int wmain() {
                 Storage db(folder / L"data.db");
                 db.app({"fixture-source", L"Source", {}});
                 db.app({"fixture-target", L"Target", {}});
+                db.app({"fixture-other", L"Other", {}});
                 db.save({{"fixture-source", utc - 90000, 30000},
-                         {"fixture-target", utc - 60000, 35000}});
+                         {"fixture-target", utc - 60000, 35000},
+                         {"fixture-other", utc - 25000, 15000}});
                 db.setReminder("fixture-source", 60000);
             }
             Service service(folder, host);
             query(service, host, day, 50001);
+            Command candidates{Command::Query};
+            candidates.day = day;
+            candidates.request = 50004;
+            candidates.mergeFor = "fixture-target";
+            service.send(candidates);
+            auto selection = waitSnapshot(host, candidates.request);
+            require(
+                selection.mergeFor == "fixture-target" && selection.mergeCandidates.size() == 2 &&
+                    selection.mergeCandidates[0].used + selection.mergeCandidates[1].used == 45000,
+                "On-demand merge candidates retain identity and selected-period usage");
             Command merge{Command::Merge};
-            merge.app = "fixture-source";
+            merge.mergeApps = {"fixture-source", "fixture-other"};
             merge.target = "fixture-target";
             service.send(merge);
             auto merged = query(service, host, day, 50002);
@@ -214,7 +228,7 @@ int wmain() {
                 std::find_if(merged.reminders.begin(), merged.reminders.end(),
                              [](const auto &view) { return view.rule.kind == ReminderKind::App; });
             require(rule != merged.reminders.end() && rule->rule.app == "fixture-target" &&
-                        rule->used == 65000,
+                        rule->used == 80000,
                     "Mapping reload transfers reminder to combined canonical usage");
             auto noticeCount = notices.size();
             Command desktop;
@@ -224,6 +238,29 @@ int wmain() {
             require(notices.size() == noticeCount + 1 &&
                         notices.back().rule.app == "fixture-target",
                     "Regrouped reminder evaluates against current application mapping");
+            auto grouped = query(service, host, day, 50005, "fixture-target");
+            require(grouped.members.size() == 3 && grouped.selectedTotal == 80000 &&
+                        grouped.members.front().app.id == "fixture-target",
+                    "Detail query exposes group members with the current primary first");
+            Command primary{Command::SetPrimary};
+            primary.app = "fixture-target";
+            primary.target = "fixture-source";
+            service.send(primary);
+            auto promoted = query(service, host, day, 50006, "fixture-source");
+            require(promoted.selected.app.id == "fixture-source" &&
+                        promoted.selectedTotal == 80000 && promoted.members.size() == 3,
+                    "Setting primary preserves group usage and refreshes detail identity");
+            Command separate{Command::Unmerge};
+            separate.app = "fixture-source";
+            separate.target = "fixture-other";
+            service.send(separate);
+            auto separated = query(service, host, day, 50007, "fixture-source");
+            require(separated.selectedTotal == 65000 && separated.members.size() == 2 &&
+                        query(service, host, day, 50008, "fixture-other").selectedTotal == 15000 &&
+                        separated.total == 80000,
+                    "Removing one member restores independent usage without changing totals");
+            require(notices.size() == noticeCount + 1,
+                    "Editing group membership does not replay a delivered reminder");
         }
         std::cout << "PASS: " << checks << " service checks\n";
     } catch (const std::exception &e) {

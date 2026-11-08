@@ -11,7 +11,7 @@ def mb(n):return f'{n/1_000_000:.3f} MB'
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 exe=dist/'TimeTrace.exe';setup=dist/f'TimeTrace-{version}-Setup.exe';binary=sha(exe)
 lines=[f'# TimeTrace {version} 测试报告','',f'生成时间：{datetime.now().astimezone().isoformat(timespec="seconds")}','',
-'本版统一应用身份解析，使用 Windows 应用标识、快捷方式和安装登记等证据自动归组，保留手动名称与分组。升级至 schema 5，修正短时长展示、合并方向、历史详情和托盘提示，并覆盖首次登记及跨午夜保存失败后的恢复。保持原生界面、一个工作线程和原有心跳。开发检查使用隔离目录，实际记录以副本验证。','',
+'本版改进合并窗口，提供搜索、多选、同目录记录优先和合并后用时预览。详情页可查看成员、移出成员或设置主应用。schema 6 保存手动独立状态，保留原始记录和既有提醒。保持原生界面、一个工作线程和原有心跳。开发检查使用隔离目录，实际记录以副本验证。','',
 '## 功能与原生界面','']
 for suffix,label in [('core-tests.log','核心／存储／协议'),('integration-tests.log','隔离安装注册'),('service-tests.log','采集与查询队列'),('identity-tests.log','通用身份识别')]:
  p=proof/(tag+'-'+suffix)
@@ -32,8 +32,13 @@ if l:
  f'- 先执行 {l["warmup_cycles"]} 次含弹窗、确认框、最大化等操作的预热，再执行 {l.get("measured_cycles",l["cycles"]-l["warmup_cycles"])} 次窗口开关。测试器使用异步按钮消息并等待模态窗口退出，避免测试动作嵌套改变执行顺序。',
  f'- 预热开关后 GDI 句柄 {l["baseline_gdi_handles"]} → {l["final_gdi_handles"]}，USER 句柄 {l["baseline_user_handles"]} → {l["final_user_handles"]}；关闭后的私有工作集 {mb(l["private_working_set_after_cycles"])}。自启动真实设置未切换。'])
  lines.append(f'- 空历史日期仍能读取当前应用名称 {l.get("native_historical_identity",False)}，合并后保留当前应用身份 {l.get("native_merge_kept_current_identity",False)}。')
+ lines.append(f'- 合并搜索及跨过滤勾选 {l.get("native_merge_search_and_selection",False)}，多项提交 {l.get("native_merge_multiple_records",False)}，合并用时预览 {l.get("native_merge_usage_preview",False)}。')
+ lines.append(f'- 合并成员查看 {l.get("native_members_view",False)}，更换主应用 {l.get("native_primary_changed",False)}，取消移出 {l.get("native_member_move_cancel",False)}，移出恢复独立 {l.get("native_member_moved",False)}，重新合并 {l.get("native_member_remerged",False)}。')
 lines+=['- 界面沿用 16／22／44 DIP 三档字号、统一尺寸和底部详情栏。原生窗口回归覆盖默认／最小窗口及常用编辑操作。既有设计规范见 `DESIGN.md`。','']
 identity=read('identity-summary.json')
+merge=read('merge-field.json')
+if merge:
+ lines.extend(['## 实际记录副本中的合并管理','',f'- 一次合并 {merge["source_count"]} 项同目录记录。原始区间逐项不变 {merge["raw_intervals_unchanged"]}，全部应用累计核对一致 {merge["all_group_totals_correct"]}，重复提交保持幂等 {merge["repeat_is_noop"]}。',f'- 更换主应用保留组名称和用时 {merge["primary_keeps_usage_and_name"]}，移出恢复该成员用时 {merge["separation_restores_member_usage"]}，重新合并保持总量 {merge["remerge_preserves_totals"]}。',''])
 if identity:
  lines.extend(['## 实际记录副本','',f'- 原始应用来源 {identity["sources"]} 项，原始区间 {identity["intervals"]} 条。通用证据提供归属候选 {identity["identified"]} 项，实际目录整理后 {identity["canonical_apps"]} 项。候选数量包含原本已经独立识别的软件。',f'- 整理前后原始时段逐项与累计总量一致，数据库完整性和外键检查通过，重复整理结果稳定。核对通过 {identity["passed"]}。','- 路径为空的旧未知区间统一展示为“未识别应用”；缺少可靠关联信息的插件、游戏内核等保留独立记录，可手动并入当前应用。',''])
 migration=proof/(tag+'-migration-final-copy/result.json')
@@ -58,7 +63,7 @@ if fg:
 lines+=['','## 资源与体积','',f'- 应用程序：{exe.stat().st_size:,} 字节（{mb(exe.stat().st_size)}）。']
 if setup.exists():lines.append(f'- 离线安装包：{setup.stat().st_size:,} 字节（{mb(setup.stat().st_size)}）；'+('满足 ≤10 MB。' if setup.stat().st_size<=10_000_000 else '超过目标。'))
 upgrade=read('upgrade-verification.json')
-if upgrade:lines.append(f'- 本机已有安装升级到 {version}，安装文件合计 {mb(upgrade["installed_bytes"])}。升级前已备份，{upgrade["original_intervals"]} 条原始区间逐项一致，自定义名称和手动分组保留，数据库完整性检查通过 {upgrade["passed"]}。已检查真实窗口打开和关闭后继续托盘运行。')
+if upgrade:lines.append(f'- 本机已有安装升级到 {version}，安装文件合计 {mb(upgrade["installed_bytes"])}。升级前已备份，{upgrade["original_intervals"]} 条原始区间逐项一致，自定义名称和手动分组保留，数据库完整性检查通过 {upgrade["passed"]}。本版原生窗口回归使用隔离数据完成。')
 p=read('final-background.json');status=read('final-background-status.json')
 if p and status and p.get('pid')==status.get('ApplicationPID') and status.get('SHA256','').lower()==binary:
  cpu=f'{p["average_cpu_percent"]:.4f}%' if p['average_cpu_percent']>=0.01 else '<0.01%（低于显示精度）'

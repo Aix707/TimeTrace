@@ -153,6 +153,10 @@ struct AppResolver::Impl {
     ResolvedApp identify(const AppInfo &source) {
         return catalog_.identify(source, {metadata(source.path), {}, false});
     }
+    std::vector<MergeCandidate> mergeCandidates(const std::vector<AppInfo> &catalog,
+                                                const std::string &current) const {
+        return catalog_.mergeCandidates(catalog, current);
+    }
     ResolvedApp resolve(HWND hwnd, DWORD pid) {
         if (!pid)
             return {};
@@ -273,5 +277,9 @@ ResolvedApp AppResolver::resolve(HWND window, DWORD pid) {
 }
 ResolvedApp AppResolver::identify(const AppInfo &app) {
     return impl_->identify(app);
+}
+std::vector<MergeCandidate> AppResolver::mergeCandidates(const std::vector<AppInfo> &catalog,
+                                                         const std::string &current) {
+    return impl_->mergeCandidates(catalog, current);
 }
 } // namespace tt

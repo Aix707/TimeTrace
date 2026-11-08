@@ -1,0 +1,12 @@
+{
+  "source_count": 7,
+  "intervals": 6025,
+  "raw_intervals_unchanged": true,
+  "all_group_totals_correct": true,
+  "target_identity_preserved": true,
+  "repeat_is_noop": true,
+  "primary_keeps_usage_and_name": true,
+  "separation_restores_member_usage": true,
+  "remerge_preserves_totals": true,
+  "passed": true
+}

@@ -168,6 +168,14 @@ void Service::run() {
                 std::make_unique<Snapshot>(db.snapshot(command.day, command.weekly, command.app));
             data->reminders = engine.views();
             data->request = command.request;
+            if (!command.mergeFor.empty()) {
+                data->mergeFor = command.mergeFor;
+                data->mergeCandidates = resolver.mergeCandidates(data->catalog, command.mergeFor);
+                for (auto &candidate : data->mergeCandidates)
+                    for (const auto &row : data->apps)
+                        if (row.app.id == candidate.app.id)
+                            candidate.used = row.used;
+            }
             for (auto &view : data->reminders) {
                 view.name = view.rule.kind == ReminderKind::Device ? L"休息提醒" : L"";
                 for (const auto &app : data->catalog)
@@ -298,7 +306,24 @@ void Service::run() {
                 case Command::Merge:
                     consume();
                     persist();
-                    db.mergeApps(command.app, command.target);
+                    if (command.mergeApps.empty())
+                        db.mergeApps(command.app, command.target);
+                    else
+                        db.mergeApps(command.mergeApps, command.target);
+                    reload();
+                    evaluate();
+                    break;
+                case Command::Unmerge:
+                    consume();
+                    persist();
+                    db.unmergeApp(command.app, command.target);
+                    reload();
+                    evaluate();
+                    break;
+                case Command::SetPrimary:
+                    consume();
+                    persist();
+                    db.setPrimary(command.app, command.target);
                     reload();
                     evaluate();
                     break;
