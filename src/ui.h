@@ -25,6 +25,7 @@ class Ui {
                    std::string selected = {}, int width = 1140, int height = 810);
 
   private:
+    friend struct UiTestAccess;
     Service *service_;
     HWND host_{}, window_{};
     std::filesystem::path directory_;
@@ -36,12 +37,19 @@ class Ui {
     int detailScroll_{}, detailScrollMax_{};
     D2D1_RECT_F detailViewport_{};
     bool weekly_{}, followToday_{true};
-    std::string day_, selected_, pendingMerge_;
+    std::string day_, selected_, pendingMerge_, pendingMembers_;
+    std::wstring serviceError_;
+    D2D1_POINT_2F pointer_{-1, -1};
     struct Hit {
+        enum Role { Control, Navigation };
         D2D1_RECT_F rect;
         int action;
         std::string app;
         float contentTop{}, contentBottom{};
+        Role role{Control};
+        bool sameControl(const Hit &other) const {
+            return role == other.role && action == other.action && app == other.app;
+        }
     };
     std::vector<Hit> hits_;
     Microsoft::WRL::ComPtr<ID2D1Factory> factory_;
@@ -57,7 +65,7 @@ class Ui {
     void segments(ui::Canvas &canvas, D2D1_RECT_F rect, const std::vector<std::wstring> &labels,
                   int selected, int firstAction);
     void toggle(ui::Canvas &canvas, D2D1_RECT_F rect, bool enabled, int action);
-    void applicationIcon(ui::Canvas &canvas, const AppRow *app, D2D1_RECT_F rect);
+    void applicationIcon(ui::Canvas &canvas, const std::shared_ptr<void> &icon, D2D1_RECT_F rect);
     void drawSettings(ui::Canvas &canvas, float x, float right);
     void drawUsage(ui::Canvas &canvas, float x, float right, float height, Millis total);
     void drawOverview(ui::Canvas &canvas, float x, float right, float height);
@@ -69,13 +77,14 @@ class Ui {
                         float top, bool showApp);
     void reminderActions(ui::Canvas &canvas, float right, float top, const std::string &app = {});
     int hitAt(float x, float y) const;
+    bool hovered(D2D1_RECT_F rect) const;
     int listCapacity(float height) const;
     std::vector<std::string> visibleIconApps() const;
     void refreshVisibleIcons();
 
     void paint();
-    void draw(ID2D1RenderTarget *rt, float width, float height);
-    void act(const Hit &hit);
+    HRESULT draw(ID2D1RenderTarget *rt, float width, float height);
+    void act(Hit hit);
     void promptReminder(const std::string &app, bool device = false, bool chooseApp = false);
     void promptApp(const std::string &app, bool merge);
     void promptMembers(const std::string &app);

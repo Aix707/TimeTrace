@@ -6,11 +6,11 @@ TimeTrace 是一个轻量、完全离线的 Windows 11 x64 屏幕时间应用。
 
 ![TimeTrace 使用概览](docs/overview.png)
 
-1.4.1 将应用来源整理为提醒下方的独立卡片，统一来源管理的字号、路径层级、圆角和操作样式。界面规范见 `docs/DESIGN.md`。
+1.4.2 优化前台识别、应用归类、成员查询与界面资源管理，并修正主来源切换和刷新后的键盘焦点。[更新说明](docs/RELEASE-1.4.2.md) · [界面规范](docs/DESIGN.md)
 
 ## 安装与使用
 
-从 [Releases](https://github.com/Aix707/TimeTrace/releases/latest) 下载 `TimeTrace-1.4.1-Setup.exe` 按用户安装，或下载 `TimeTrace.exe` 直接运行。主程序约 1.24 MB，离线安装包约 0.65 MB，支持 Windows 11 x64。源码包与 SHA-256 校验文件同页提供。
+下载 `TimeTrace-1.4.2-Setup.exe` 按用户安装，或下载 `TimeTrace.exe` 直接运行。源码包 `TimeTrace-1.4.2-Source.zip` 和校验文件 `SHA256SUMS.txt` 随发行版提供。[公开发行版](https://github.com/Aix707/TimeTrace/releases/latest)
 
 安装默认不开机启动。升级时选择原安装目录，无需先卸载。首次运行将 schema 1—6 自动升级至 schema 7，保留使用记录、自定义名称、手动分组和提醒配置。升级前退出旧版并备份数据目录。
 

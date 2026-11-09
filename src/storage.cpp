@@ -167,7 +167,20 @@ void Storage::commit(const std::vector<Usage> &entries, const std::vector<Remind
 void Storage::writeUsage(const std::vector<Usage> &entries) {
     if (entries.empty())
         return;
-    Statement last(db_, "SELECT id,app,end,day,hour FROM segments ORDER BY id DESC LIMIT 1");
+    struct Tail {
+        int64_t id{};
+        std::string app;
+        Millis end{};
+        std::string day;
+        int hour{};
+    };
+    std::optional<Tail> tail;
+    {
+        Statement last(db_, "SELECT id,app,end,day,hour FROM segments ORDER BY id DESC LIMIT 1");
+        if (last.step())
+            tail = Tail{last.integer(0), last.text(1), last.integer(2), last.text(3),
+                        static_cast<int>(last.integer(4))};
+    }
     Statement update(db_, "UPDATE segments SET end=?1,duration=duration+?2 WHERE id=?3");
     Statement insert(db_, "INSERT INTO segments(app,start,end,duration,day,hour) "
                           "VALUES(?1,?2,?3,?4,?5,?6)");
@@ -176,14 +189,13 @@ void Storage::writeUsage(const std::vector<Usage> &entries) {
     for (const auto &u : entries) {
         auto parts = splitLocal(u);
         for (const auto &p : parts) {
-            last.reset();
-            bool join = last.step() && last.text(1) == u.app && last.integer(2) == p.startUtc &&
-                        last.text(3) == p.day && last.integer(4) == p.hour;
+            bool join = tail && tail->app == u.app && tail->end == p.startUtc &&
+                        tail->day == p.day && tail->hour == p.hour;
             if (join) {
                 update.reset();
                 update.integer(1, p.startUtc + p.duration);
                 update.integer(2, p.duration);
-                update.integer(3, last.integer(0));
+                update.integer(3, tail->id);
                 update.step();
             } else {
                 insert.reset();
@@ -194,7 +206,9 @@ void Storage::writeUsage(const std::vector<Usage> &entries) {
                 insert.text(5, p.day);
                 insert.integer(6, p.hour);
                 insert.step();
+                tail = Tail{sqlite3_last_insert_rowid(db_), u.app, p.startUtc, p.day, p.hour};
             }
+            tail->end = p.startUtc + p.duration;
         }
         if (!parts.empty()) {
             used.reset();
@@ -320,7 +334,7 @@ std::string Storage::setPrimary(const std::string &group, const std::string &mem
     remove.text(1, member);
     remove.text(2, root);
     remove.step();
-    Statement members(db_, "UPDATE app_links SET target=?1,manual=1 WHERE target=?2");
+    Statement members(db_, "UPDATE app_links SET target=?1 WHERE target=?2");
     members.text(1, member);
     members.text(2, root);
     members.step();
@@ -412,13 +426,19 @@ Snapshot Storage::snapshot(const std::string &day, bool weekly, const std::strin
         }
         Statement members(
             db_,
-            "WITH usage AS (SELECT app,SUM(duration) used FROM segments WHERE day>=?1 "
-            "AND day<?2 GROUP BY app) SELECT "
-            "a.id,COALESCE(n.name,NULLIF(a.resolved_name,''),a.name),a.path,COALESCE(u.used,0),"
-            "EXISTS(SELECT 1 FROM segments WHERE app=a.id) FROM apps a "
-            "LEFT JOIN usage u ON u.app=a.id LEFT JOIN app_links m ON m.app=a.id "
-            "LEFT JOIN app_labels n ON n.app=a.id WHERE a.id=?3 OR (m.target=?3 AND "
-            "(a.id NOT LIKE 'app:%' OR EXISTS(SELECT 1 FROM segments WHERE app=a.id))) "
+            "WITH member_ids AS MATERIALIZED (SELECT ?3 id,1 manual UNION ALL "
+            "SELECT app,manual FROM app_links WHERE target=?3),usage AS ("
+            "SELECT app,SUM(duration) used FROM segments WHERE day>=?1 AND day<?2 "
+            "AND app IN (SELECT id FROM member_ids) GROUP BY app),members AS MATERIALIZED ("
+            "SELECT a.id,a.name,a.resolved_name,a.path,m.manual,COALESCE(u.used,0) used,"
+            "CASE WHEN u.app IS NOT NULL THEN 1 ELSE "
+            "EXISTS(SELECT 1 FROM segments WHERE app=a.id) END recorded "
+            "FROM member_ids m JOIN apps a ON a.id=m.id LEFT JOIN usage u ON u.app=a.id) "
+            "SELECT "
+            "a.id,COALESCE(n.name,NULLIF(a.resolved_name,''),a.name),a.path,a.used,a.recorded "
+            "FROM members a LEFT JOIN app_labels n ON n.app=a.id "
+            "WHERE a.id=?3 OR a.id NOT LIKE 'app:%' OR a.recorded=1 OR n.app IS NOT NULL "
+            "OR (a.manual=1 AND a.path<>'') "
             "ORDER BY a.id<>?3,COALESCE(n.name,NULLIF(a.resolved_name,''),a.name) COLLATE "
             "NOCASE,a.id");
         members.text(1, from);

@@ -773,7 +773,7 @@ void groupManagementTests(const std::filesystem::path &dir) {
         snapshot = db.snapshot(day, false, "a");
         require(snapshot.members.size() == 2 && snapshot.members[0].app.id == "a" &&
                     snapshot.members[1].app.id == "b",
-                "Member details omit synthetic aliases that never directly recorded usage");
+                "Member details omit empty synthetic aliases without source metadata or usage");
     }
     file = dir / L"schema5.db";
     {
@@ -1014,6 +1014,148 @@ void optimizationTests(const std::filesystem::path &dir) {
     std::filesystem::remove(file);
     std::filesystem::remove(file.wstring() + L"-wal");
     std::filesystem::remove(file.wstring() + L"-shm");
+}
+void storageMaintenanceTests(const std::filesystem::path &dir) {
+    auto file = dir / L"maintenance.db";
+    constexpr Millis start = 1700000000000;
+    auto day = localDay(start);
+    {
+        Storage db(file);
+        db.app({"a", L"Alpha", L"a.exe"});
+        db.app({"b", L"Beta", L"b.exe"});
+        db.save({{"a", start, 1000}, {"a", start + 1000, 2000}});
+        db.save({{"a", start + 3000, 1000},
+                 {"b", start + 4000, 1000},
+                 {"b", start + 5000, 1000},
+                 {"a", start + 6000, 1000}});
+        require(scalar(file, "SELECT COUNT(*) FROM segments") == 3 &&
+                    db.snapshot(day, false).total == 7000,
+                "A batch reuses its transaction-local tail across appends and source changes");
+        db.save({{"a", start + 7000, 0},
+                 {"a", start + 7000, -1},
+                 {"a", start + 7000, 1000}});
+        require(scalar(file, "SELECT COUNT(*) FROM segments") == 3 &&
+                    db.snapshot(day, false).total == 8000,
+                "Empty usage parts leave the existing tail unchanged");
+        bool rejected = false;
+        try {
+            db.commit({{"a", start + 8000, 1000}, {"b", start + 9000, 1000}},
+                      {{99999, day, 0, true, false, "invalid"}});
+        } catch (...) {
+            rejected = true;
+        }
+        require(rejected && db.snapshot(day, false).total == 8000 &&
+                    scalar(file, "SELECT duration FROM segments ORDER BY id DESC LIMIT 1") ==
+                        2000,
+                "A failed atomic commit rolls back both tail extension and later inserts");
+        db.save({{"a", start + 8000, 1000}, {"b", start + 9000, 1000}});
+        require(scalar(file, "SELECT COUNT(*)=4 AND SUM(duration)=10000 FROM segments") == 1 &&
+                    db.snapshot(day, false, "a").selectedTotal == 7000,
+                "Retry reads the committed tail again and preserves exact source totals");
+        db.setReminder("a", 60000);
+        auto rule = db.reminderRules().back().id;
+        db.commit({}, {{rule, day, 307000, false, true, "same-metadata"}});
+        require(db.registerApp({"a", L"Alpha", L"a.exe"}) == "a" &&
+                    db.reminderStates(day).front().token == "same-metadata",
+                "Unchanged registration preserves identity and the reminder occurrence");
+        // Simulate an already stored peer whose name was refreshed before this source.
+        rawSql(file, "UPDATE apps SET name='Alpha',resolved_name='Alpha',name_key='alpha' "
+                     "WHERE id='b';");
+        require(db.registerApp({"a", L"Alpha", L"a.exe"}) == "b" &&
+                    db.appMappings()["a"] == "b" && db.applications().size() == 1,
+                "Unchanged metadata still performs targeted classification matching");
+        auto state = db.reminderStates(day).front();
+        require(state.rule == rule && state.next == 310000 && state.muted &&
+                    state.token == "same-metadata" &&
+                    db.snapshot(day, false, "b").selectedTotal == 10000,
+                "Targeted matching retains merged totals, silence and remaining snooze");
+        rawSql(file, "UPDATE apps SET name_key='stale' WHERE id='a';");
+        db.registerApp({"a", L"Alpha", L"a.exe"});
+        require(scalar(file, "SELECT name_key='alpha' FROM apps WHERE id='a'") == 1,
+                "Registration repairs a stale normalized key without changing source metadata");
+        require(scalar(file, "PRAGMA user_version") == 7 &&
+                    scalar(file, "SELECT COUNT(*) FROM sqlite_master WHERE type='index' "
+                                 "AND tbl_name='segments'") == 1,
+                "Storage maintenance retains schema seven and the existing history index");
+    }
+    std::filesystem::remove(file);
+
+    file = dir / L"legacy-primary.db";
+    {
+        Storage db(file);
+        db.app({"app:label", L"Legacy label", {}});
+        db.app({"app:icon", L"Legacy icon", L"legacy.exe"});
+        db.app({"app:recorded", L"Historical source", {}});
+        db.app({"a", L"Source A", L"a.exe"});
+        db.app({"b", L"Source B", L"b.exe"});
+        db.renameApp("app:label", L"Saved group name");
+        db.save({{"app:recorded", start - 86400000, 500},
+                 {"a", start, 1000},
+                 {"b", start + 1000, 2000}});
+        db.mergeApps(std::vector<std::string>{"a", "app:recorded"}, "app:label");
+        db.mergeApps("b", "app:icon");
+        db.registerApp(
+            {"app:auto-alias", L"Automatic alias", L"launcher.exe", true, L"Source A"});
+        db.setPrimary("app:label", "a");
+        db.setPrimary("app:icon", "b");
+        auto details = db.snapshot(day, false, "a");
+        require(std::any_of(details.members.begin(), details.members.end(), [](const auto &row) {
+                    return row.app.id == "app:label" && row.app.name == L"Saved group name" &&
+                           !row.app.hasUsage && row.used == 0;
+                }),
+                "A former synthetic primary retains its source-specific saved name");
+        require(std::any_of(details.members.begin(), details.members.end(), [](const auto &row) {
+                    return row.app.id == "app:recorded" && row.app.hasUsage && row.used == 0;
+                }),
+                "Member aggregation distinguishes lifetime source use from the selected period");
+        require(std::none_of(details.members.begin(), details.members.end(), [](const auto &row) {
+                    return row.app.id == "app:auto-alias";
+                }) &&
+                    scalar(file, "SELECT manual=0 FROM app_links WHERE app='app:auto-alias'") ==
+                        1 &&
+                    scalar(file, "SELECT manual=1 AND target='a' FROM app_links "
+                                 "WHERE app='app:label'") == 1,
+                "Primary changes retain automatic hidden aliases and protect the former primary");
+        require(details.members.size() == 3 && details.selectedTotal == 1000,
+                "Legacy display sources add no time and member totals retain the selected period");
+        details = db.snapshot(day, false, "b");
+        require(std::any_of(details.members.begin(), details.members.end(), [](const auto &row) {
+                    return row.app.id == "app:icon" && row.app.path == L"legacy.exe" &&
+                           !row.app.hasUsage;
+                }),
+                "A former synthetic primary with an icon path remains selectable");
+    }
+    {
+        Storage db(file);
+        db.setPrimary("a", "app:label");
+        db.setPrimary("b", "app:icon");
+        require(db.snapshot(day, false, "app:label").selected.app.name == L"Saved group name" &&
+                    db.snapshot(day, false, "app:icon").selected.app.path == L"legacy.exe" &&
+                    db.snapshot(day, false).total == 3000,
+                "Restart and switching back restore legacy primary names and icon paths");
+        auto restored = db.snapshot(day, false, "app:label");
+        require(restored.members.size() == 3 &&
+                    scalar(file, "SELECT manual=0 FROM app_links WHERE app='app:auto-alias'") ==
+                        1 &&
+                    scalar(file, "SELECT manual=1 AND target='app:label' FROM app_links "
+                                 "WHERE app='a'") == 1,
+                "A primary roundtrip preserves the visible sources and explicit group protection");
+        db.moveMember("app:label", "a", "app:icon");
+        db.moveMember("app:label", "app:recorded", "app:icon");
+        require(db.applications().size() == 1 && db.applications()[0].id == "app:icon" &&
+                    db.snapshot(day, false).total == 3000,
+                "Moving the last recorded members removes a legacy classification naturally");
+        db.clear();
+        require(db.applications().empty() && db.snapshot(day, false).total == 0,
+                "Retained legacy source metadata never creates a classification without usage");
+        std::wstring iconPath;
+        require(db.displayName("app:icon", &iconPath) == L"Legacy icon" &&
+                    iconPath == L"legacy.exe",
+                "Reminder metadata can retain its icon path after usage has been cleared");
+        require(db.displayName("missing", &iconPath).empty() && iconPath.empty(),
+                "A missing metadata source clears the optional icon path");
+    }
+    std::filesystem::remove(file);
 }
 void nameMigrationTests(const std::filesystem::path &dir) {
     auto file = dir / L"name-migration.db";
@@ -1268,6 +1410,7 @@ int wmain(int argc, wchar_t **argv) {
         groupManagementTests(dir);
         migrationTests(dir);
         optimizationTests(dir);
+        storageMaintenanceTests(dir);
         identityStorageTests(dir);
         nameMigrationTests(dir);
         // Files are all fixed names in this process's test directory; never touch a user profile.

@@ -31,13 +31,9 @@ void Ui::appReminderRow(ui::Canvas &c, const ReminderView &view, float x, float 
     auto state = appState(view);
     if (showApp) {
         D2D1_RECT_F identity{x + 8, top + 4, right - 300, top + size::preferenceRow - 4};
-        if (hover_ == static_cast<int>(hits_.size()))
+        if (hovered(identity))
             c.fill(identity, theme::hover, size::radius);
-        const AppRow *row = nullptr;
-        for (const auto &app : snapshot_.apps)
-            if (app.app.id == view.rule.app)
-                row = &app;
-        applicationIcon(c, row,
+        applicationIcon(c, view.icon,
                         {x + size::inset, top + 24, x + size::inset + size::icon, top + 56});
         c.rowText(view.name, used + (state.empty() ? L"" : L" · " + state), x + 80, top,
                   right - 300);

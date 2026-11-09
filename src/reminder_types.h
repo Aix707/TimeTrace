@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <memory>
 #include <string>
 
 namespace tt {
@@ -34,5 +35,6 @@ struct ReminderView {
     ReminderState state;
     int64_t used{};
     std::wstring name;
+    std::shared_ptr<void> icon;
 };
 } // namespace tt

@@ -44,6 +44,7 @@ struct Command {
     uint64_t request{};
     std::vector<std::string> iconApps;
     size_t iconCount{16};
+    bool memberIcons{};
     std::string mergeFor;
     std::vector<std::string> mergeApps;
     std::string destination;

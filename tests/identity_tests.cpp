@@ -165,6 +165,15 @@ int main() {
         require(launch.representative.id == "app:install:product" &&
                     child.representative.id == launch.representative.id,
                 "registered uninstaller icon and launch shortcut share product identity");
+        IdentityCatalog alternateTarget(
+            {{"alternate", L"Alternate", L"C:/Apps/Alternate/",
+              L"C:/Apps/Alternate/remove.exe", L"Vendor", {},
+              {L"C:/APPS/Alternate/Launch.exe"}}});
+        auto alternate = alternateTarget.identify(source(L"C:\\Apps\\Alternate\\launch.exe"),
+                                                   metadata(L"", L""));
+        require(alternate.representative.id == "app:install:alternate" &&
+                    alternate.representative.path == L"c:\\apps\\alternate\\remove.exe",
+                "Injected alternate targets retain normalized exact matching");
         wchar_t windowsDirectory[MAX_PATH]{};
         GetWindowsDirectoryW(windowsDirectory, MAX_PATH);
         auto shellPath = std::wstring(windowsDirectory) + L"\\explorer.exe";
@@ -173,6 +182,9 @@ int main() {
         require(sharedHost.identify(source(shellPath.c_str()), metadata(L"Windows", L"Microsoft"))
                     .representative.id.empty(),
                 "folder shortcuts cannot rename a shared Windows host");
+        require(sharedHost.identify(source(shellPath.c_str()), metadata(L"Windows", L"Microsoft"))
+                    .evidence == "system-executable",
+                "Repeated identification retains the cached Windows directory boundary");
         std::vector<AppInfo> mergeApps{
             {"app:install:suite", L"Suite", L"C:\\Apps\\Suite\\Suite.exe"},
             {"other", L"Other", L"C:\\Apps\\Other\\app.exe"},

@@ -72,6 +72,7 @@ struct Snapshot {
     std::vector<AppRow> apps;
     AppRow selected;
     std::vector<AppRow> members;
+    bool memberIcons{};
     std::vector<AppInfo> catalog;
     std::string mergeFor;
     std::vector<MergeCandidate> mergeCandidates;

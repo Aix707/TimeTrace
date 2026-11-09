@@ -17,7 +17,7 @@ std::wstring checkedName(const std::wstring &value) {
     return {first, last};
 }
 } // namespace
-void Storage::upsertApp(const AppInfo &app) {
+bool Storage::upsertApp(const AppInfo &app) {
     if (app.id.empty())
         throw std::runtime_error("Application identity is empty");
     bool identified = app.identified && app.id != "app:unidentified" &&
@@ -28,7 +28,8 @@ void Storage::upsertApp(const AppInfo &app) {
                        "name=excluded.name,path=excluded.path,resolved_name=excluded.resolved_name,"
                        "name_key=excluded.name_key,identified=excluded.identified WHERE "
                        "name<>excluded.name OR path<>excluded.path OR "
-                       "resolved_name<>excluded.resolved_name OR identified<>excluded.identified");
+                       "resolved_name<>excluded.resolved_name OR name_key<>excluded.name_key OR "
+                       "identified<>excluded.identified");
     row.text(1, app.id);
     row.text(2, utf8(app.name));
     row.text(3, utf8(app.path));
@@ -36,8 +37,10 @@ void Storage::upsertApp(const AppInfo &app) {
     row.text(5, applicationNameKey(name));
     row.integer(6, identified);
     row.step();
-    if (sqlite3_changes(db_))
+    bool changed = sqlite3_changes(db_) != 0;
+    if (changed)
         catalog_.reset();
+    return changed;
 }
 void Storage::app(const AppInfo &app) {
     registerApp(app);
@@ -51,7 +54,7 @@ std::string Storage::registerApp(const AppInfo &source, const AppInfo &represent
         info.identified &&
         !applicationNameKey(info.applicationName.empty() ? info.name : info.applicationName)
              .empty();
-    upsertApp(info);
+    bool changed = upsertApp(info);
     auto current = canonicalId(source.id);
     if (!info.identified || source.id.starts_with("unknown:") ||
         source.id.starts_with("unknown-frame:")) {
@@ -59,6 +62,7 @@ std::string Storage::registerApp(const AppInfo &source, const AppInfo &represent
             if (canonicalId("app:unidentified").empty())
                 upsertApp({"app:unidentified", L"未识别用时", {}});
             mergeRoots(source.id, "app:unidentified", false);
+            changed = true;
         }
     } else {
         // The name of any existing member also identifies its renamed classification.
@@ -78,20 +82,31 @@ std::string Storage::registerApp(const AppInfo &source, const AppInfo &represent
             matching.text(1, applicationNameKey(
                                  info.applicationName.empty() ? info.name : info.applicationName));
             matching.text(2, current);
-            if (matching.step())
+            if (matching.step()) {
                 mergeRoots(current, matching.text(0), false);
+                changed = true;
+            }
         }
     }
-    regroupNames();
+    if (changed)
+        regroupNames();
     auto result = canonicalId(source.id);
     transaction.commit();
     return result;
 }
-std::wstring Storage::displayName(const std::string &app) {
-    Statement name(db_, "SELECT COALESCE(n.name,NULLIF(a.resolved_name,''),a.name) FROM apps a "
-                        "LEFT JOIN app_labels n ON n.app=a.id WHERE a.id=?1");
+std::wstring Storage::displayName(const std::string &app, std::wstring *path) {
+    Statement name(db_,
+                   "SELECT COALESCE(n.name,NULLIF(a.resolved_name,''),a.name),a.path FROM apps a "
+                   "LEFT JOIN app_labels n ON n.app=a.id WHERE a.id=?1");
     name.text(1, app);
-    return name.step() ? wide(name.text(0)) : std::wstring{};
+    if (!name.step()) {
+        if (path)
+            path->clear();
+        return {};
+    }
+    if (path)
+        *path = wide(name.text(1));
+    return wide(name.text(0));
 }
 void Storage::checkName(const std::string &group, const std::wstring &name, bool combine) {
     if (combine)

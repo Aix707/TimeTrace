@@ -1,6 +1,11 @@
 #include "platform.h"
+#include <shlobj.h>
+#include <shellapi.h>
 #include <algorithm>
 #include <iostream>
+#include <propsys.h>
+#include <propkey.h>
+#include <propvarutil.h>
 #include <stdexcept>
 
 using namespace tt;
@@ -11,6 +16,18 @@ void require(bool condition, const char *message) {
     ++checks;
     if (!condition)
         throw std::runtime_error(message);
+}
+void setWindowAppId(HWND window, const wchar_t *id) {
+    IPropertyStore *properties{};
+    require(SUCCEEDED(SHGetPropertyStoreForWindow(window, IID_PPV_ARGS(&properties))),
+            "Open isolated window identity properties");
+    PROPVARIANT value{};
+    auto status = id ? InitPropVariantFromString(id, &value) : S_OK;
+    if (SUCCEEDED(status))
+        status = properties->SetValue(PKEY_AppUserModel_ID, value);
+    PropVariantClear(&value);
+    properties->Release();
+    require(SUCCEEDED(status), "Set isolated window identity");
 }
 Snapshot waitSnapshot(HWND host, uint64_t request, bool allowError = false) {
     auto deadline = GetTickCount64() + 15000;
@@ -65,18 +82,58 @@ Snapshot query(Service &service, HWND host, const std::string &day, uint64_t req
 }
 } // namespace
 int wmain() {
+    auto apartment = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     auto dir = std::filesystem::temp_directory_path() /
                (L"TimeTrace-service-" + std::to_wstring(GetCurrentProcessId()));
     auto host = CreateWindowExW(0, L"STATIC", L"Service test", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr,
                                 GetModuleHandleW(nullptr), nullptr);
     int result{};
     try {
+        require(SUCCEEDED(apartment), "Initialize isolated test apartment");
         require(host != nullptr, "Create isolated message target");
         auto utc = utcNow(), tick = static_cast<Millis>(GetTickCount64());
         // Keep the entire synthetic test on one local day.
         while (localDay(utc + 60000) != localDay(utc))
             utc -= 60000;
         auto day = localDay(utc);
+        {
+            AppResolver resolver;
+            auto native = resolver.resolve(host, GetCurrentProcessId());
+            auto repeated = resolver.resolve(host, GetCurrentProcessId());
+            require(!native.source.path.empty() && repeated.source.id == native.source.id &&
+                        repeated.representative.id == native.representative.id,
+                    "Repeated live process resolution preserves cached application identity");
+            setWindowAppId(host, L"TimeTrace.ServiceFixture.One");
+            auto first = resolver.resolve(host, GetCurrentProcessId());
+            setWindowAppId(host, L"TimeTrace.ServiceFixture.Two");
+            auto second = resolver.resolve(host, GetCurrentProcessId());
+            require(first.source.id == "aumid:TimeTrace.ServiceFixture.One" &&
+                        second.source.id == "aumid:TimeTrace.ServiceFixture.Two" &&
+                        first.representative.id != second.representative.id,
+                    "A changed window AppID invalidates the process result cache");
+            setWindowAppId(host, nullptr);
+            require(resolver.resolve(host, GetCurrentProcessId()).source.id == native.source.id,
+                    "Clearing a window AppID restores the process application identity");
+            wchar_t systemDirectory[MAX_PATH]{};
+            GetSystemDirectoryW(systemDirectory, MAX_PATH);
+            auto executable = std::wstring(systemDirectory) + L"\\cmd.exe";
+            auto commandLine = L"\"" + executable + L"\" /d /c exit";
+            STARTUPINFOW startup{sizeof(startup)};
+            PROCESS_INFORMATION process{};
+            require(CreateProcessW(executable.c_str(), commandLine.data(), nullptr, nullptr,
+                                   FALSE, CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr, nullptr,
+                                   &startup, &process) != FALSE,
+                    "Launch isolated short-lived identity fixture");
+            auto live = resolver.resolve(nullptr, process.dwProcessId);
+            ResumeThread(process.hThread);
+            auto exited = WaitForSingleObject(process.hProcess, 10000);
+            CloseHandle(process.hThread);
+            CloseHandle(process.hProcess);
+            auto expired = resolver.resolve(nullptr, process.dwProcessId);
+            require(exited == WAIT_OBJECT_0 && !live.source.path.empty() &&
+                        expired.source.id != live.source.id && expired.source.path.empty(),
+                    "An exited process cannot reuse a cached executable identity");
+        }
         {
             Service service(dir, host);
             for (int i = 0; i <= 100; ++i) {
@@ -123,6 +180,15 @@ int wmain() {
             Storage db(dir / L"data.db");
             require(db.getSetting("paused") == "1" && db.snapshot(day, false).total == 0,
                     "Service shutdown flushes state in the isolated profile");
+        }
+        {
+            auto folder = dir / L"failed-start";
+            std::filesystem::create_directories(folder / L"data.db");
+            Service service(folder, host);
+            auto failure = waitSnapshot(host, 0, true);
+            require(!failure.error.empty() && !service.finish(),
+                    "Fatal initialization publishes an unrequested error and cannot report a "
+                    "successful final save");
         }
         {
             Service service(dir / L"registration", host);
@@ -269,6 +335,86 @@ int wmain() {
                     "Clearing usage hides empty classifications while retaining named reminder "
                     "settings");
         }
+        {
+            auto folder = dir / L"icons";
+            auto path = executablePath().wstring();
+            {
+                Storage db(folder / L"data.db");
+                db.app({"app:icon-primary", L"Icon primary", path});
+                db.app({"app:icon-member", L"Icon member", path});
+                db.save({{"app:icon-primary", utc - 2000, 1000},
+                         {"app:icon-member", utc - 1000, 1000}});
+                db.mergeApps("app:icon-member", "app:icon-primary");
+                db.setReminder("app:icon-primary", 3600000);
+            }
+            Service service(folder, host);
+            auto detail = query(service, host, day, 60001, "app:icon-primary");
+            require(detail.selected.icon && !detail.memberIcons && detail.members.size() == 2 &&
+                        std::none_of(detail.members.begin(), detail.members.end(),
+                                     [](const auto &member) { return !!member.icon; }),
+                    "Ordinary detail queries retain members without loading member icons");
+            Command management{Command::Query};
+            management.day = day;
+            management.app = "app:icon-primary";
+            management.request = 60002;
+            management.memberIcons = true;
+            service.send(management);
+            auto members = waitSnapshot(host, management.request);
+            require(members.memberIcons && members.members.size() == 2 &&
+                        std::all_of(members.members.begin(), members.members.end(),
+                                    [&](const auto &member) {
+                                        return member.icon == members.selected.icon;
+                                    }),
+                    "Member management explicitly loads icons and shares identical paths");
+            Command reminders{Command::Query};
+            reminders.day = shiftDay(day, -1);
+            reminders.request = 60003;
+            reminders.iconApps = {"app:icon-primary"};
+            service.send(reminders);
+            auto historical = waitSnapshot(host, reminders.request);
+            auto appReminder = std::find_if(
+                historical.reminders.begin(), historical.reminders.end(),
+                [](const auto &view) { return view.rule.kind == ReminderKind::App; });
+            require(historical.apps.empty() && appReminder != historical.reminders.end() &&
+                        appReminder->icon == detail.selected.icon,
+                    "Reminder icons come from their application outside the selected period");
+            {
+                WriteLock lock(folder / L"data.db");
+                lock.exec("UPDATE apps SET path='' WHERE id='app:icon-primary'");
+                lock.exec("COMMIT");
+            }
+            Command rename{Command::Rename};
+            rename.app = "app:icon-primary";
+            rename.name = L"Icon primary updated";
+            service.send(rename);
+            auto updated = query(service, host, day, 60004, "app:icon-primary");
+            require(updated.selected.app.path.empty() && !updated.selected.icon,
+                    "A path change invalidates the icon without changing application identity");
+            service.send({Command::ReleaseView});
+            management.request = 60005;
+            service.send(management);
+            auto reopened = waitSnapshot(host, management.request);
+            require(reopened.memberIcons && !reopened.selected.icon &&
+                        reopened.members.size() == 2 && reopened.members[1].icon,
+                    "Reopening member management reloads icons after releasing view resources");
+            Command primary{Command::SetPrimary};
+            primary.app = "app:icon-primary";
+            primary.target = "app:icon-member";
+            service.send(primary);
+            service.send({Command::Clear});
+            reminders.request = 60006;
+            reminders.iconApps = {"app:icon-member"};
+            service.send(reminders);
+            auto cleared = waitSnapshot(host, reminders.request);
+            appReminder = std::find_if(
+                cleared.reminders.begin(), cleared.reminders.end(),
+                [](const auto &view) { return view.rule.kind == ReminderKind::App; });
+            require(cleared.total == 0 && cleared.catalog.empty() &&
+                        appReminder != cleared.reminders.end() && appReminder->icon &&
+                        appReminder->name == L"Icon member",
+                    "Clearing history retains reminder names and icons without empty "
+                    "application classifications");
+        }
         std::cout << "PASS: " << checks << " service checks\n";
     } catch (const std::exception &e) {
         std::cerr << "FAIL after " << checks << " checks: " << e.what() << '\n';
@@ -282,7 +428,8 @@ int wmain() {
             delete reinterpret_cast<ReminderEvent *>(message.lParam);
     }
     DestroyWindow(host);
-    for (auto child : {L"", L"registration", L"midnight", L"reminder", L"mapping"}) {
+    for (auto child : {L"", L"registration", L"midnight", L"reminder", L"mapping",
+                       L"failed-start", L"icons"}) {
         auto folder = dir / child;
         for (auto name : {L"data.db", L"data.db-wal", L"data.db-shm"})
             std::filesystem::remove(folder / name);
@@ -290,5 +437,7 @@ int wmain() {
             std::filesystem::remove(folder);
     }
     std::filesystem::remove(dir);
+    if (SUCCEEDED(apartment))
+        CoUninitialize();
     return result;
 }

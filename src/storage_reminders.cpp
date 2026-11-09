@@ -100,11 +100,14 @@ void Storage::removeReminder(int64_t rule) {
 }
 void Storage::mergeReminders(const std::string &from, const std::string &to, bool automatic) {
     int64_t source{}, target{};
-    for (const auto &r : reminderRules()) {
-        if (r.app == from)
-            source = r.id;
-        if (r.app == to)
-            target = r.id;
+    Statement rules(db_, "SELECT id,app FROM reminder_rules WHERE app IN (?1,?2)");
+    rules.text(1, from);
+    rules.text(2, to);
+    while (rules.step()) {
+        if (rules.text(1) == from)
+            source = rules.integer(0);
+        else
+            target = rules.integer(0);
     }
     if (!source && !target)
         return;

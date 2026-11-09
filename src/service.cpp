@@ -17,9 +17,9 @@ bool Service::finish() {
     return shutdownSaved_;
 }
 void Service::send(Command command) {
+    std::lock_guard lock(mutex_);
     if (!alive_)
         return;
-    std::lock_guard lock(mutex_);
     if (command.kind == Command::Query || command.kind == Command::ReleaseView)
         std::erase_if(queue_,
                       [](const Command &pending) { return pending.kind == Command::Query; });
@@ -61,7 +61,7 @@ void Service::run() {
         std::deque<Activity> activities;
         Sample latest{};
         std::wstring error;
-        std::unordered_map<std::string, std::shared_ptr<void>> icons;
+        std::unordered_map<std::wstring, std::shared_ptr<void>> icons;
         Millis savedTick = static_cast<Millis>(GetTickCount64());
         auto persist = [&] {
             db.commit(pending, engine.dirty() ? engine.states() : std::vector<ReminderState>{});
@@ -168,21 +168,40 @@ void Service::run() {
                 std::make_unique<Snapshot>(db.snapshot(command.day, command.weekly, command.app));
             data->reminders = engine.views();
             data->request = command.request;
+            data->memberIcons = command.memberIcons;
+            std::unordered_map<std::string, const AppInfo *> sources;
+            for (const auto &app : data->catalog)
+                sources.emplace(app.id, &app);
+            for (const auto &member : data->members)
+                sources.insert_or_assign(member.app.id, &member.app);
+            if (!data->selected.app.id.empty())
+                sources.insert_or_assign(data->selected.app.id, &data->selected.app);
             if (!command.mergeFor.empty()) {
                 data->mergeFor = command.mergeFor;
                 data->mergeCandidates = resolver.mergeCandidates(data->catalog, command.mergeFor);
+                std::unordered_map<std::string, Millis> usage;
+                for (const auto &row : data->apps)
+                    usage.emplace(row.app.id, row.used);
                 for (auto &candidate : data->mergeCandidates)
-                    for (const auto &row : data->apps)
-                        if (row.app.id == candidate.app.id)
-                            candidate.used = row.used;
+                    if (auto found = usage.find(candidate.app.id); found != usage.end())
+                        candidate.used = found->second;
             }
+            std::vector<AppInfo> reminderSources;
+            reminderSources.reserve(data->reminders.size());
             for (auto &view : data->reminders) {
-                view.name = view.rule.kind == ReminderKind::Device ? L"休息提醒" : L"";
-                for (const auto &app : data->catalog)
-                    if (app.id == view.rule.app)
-                        view.name = app.name;
-                if (view.name.empty())
-                    view.name = db.displayName(view.rule.app);
+                if (view.rule.kind == ReminderKind::Device) {
+                    view.name = L"休息提醒";
+                    continue;
+                }
+                auto found = sources.find(view.rule.app);
+                if (found == sources.end()) {
+                    AppInfo source{view.rule.app};
+                    source.name = db.displayName(view.rule.app, &source.path);
+                    reminderSources.push_back(std::move(source));
+                    const auto &app = reminderSources.back();
+                    found = sources.emplace(app.id, &app).first;
+                }
+                view.name = found->second->name;
             }
             auto needed = command.iconApps;
             if (needed.empty())
@@ -193,43 +212,43 @@ void Service::run() {
                 }
             if (!data->selected.app.id.empty())
                 needed.insert(needed.begin(), data->selected.app.id);
-            for (const auto &member : data->members)
-                needed.push_back(member.app.id);
+            if (command.memberIcons)
+                for (const auto &member : data->members)
+                    needed.push_back(member.app.id);
             for (const auto &candidate : data->mergeCandidates)
                 needed.push_back(candidate.app.id);
             std::set<std::string> unique;
             std::erase_if(needed, [&](const auto &id) { return !unique.insert(id).second; });
             if (needed.size() > 64)
                 needed.resize(64);
-            std::erase_if(icons, [&](const auto &item) {
-                return std::find(needed.begin(), needed.end(), item.first) == needed.end();
-            });
+            std::set<std::wstring> paths;
             for (const auto &id : needed) {
-                auto app = std::find_if(data->catalog.begin(), data->catalog.end(),
-                                        [&](const auto &entry) { return entry.id == id; });
-                const AppInfo *source = app != data->catalog.end() ? &*app : nullptr;
-                if (!source)
-                    for (const auto &member : data->members)
-                        if (member.app.id == id)
-                            source = &member.app;
-                if (!source)
-                    continue;
-                auto [found, inserted] = icons.try_emplace(id);
-                // Cache failures too; keep only this view's icons, up to 64 handles.
-                if (inserted)
-                    found->second = loadAppIcon(source->path);
+                auto source = sources.find(id);
+                if (source != sources.end() && !source->second->path.empty())
+                    paths.insert(source->second->path);
             }
+            std::erase_if(icons, [&](const auto &item) { return !paths.contains(item.first); });
+            for (const auto &path : paths) {
+                auto [found, inserted] = icons.try_emplace(path);
+                // Cache failures too, sharing up to 64 paths for the current view.
+                if (inserted)
+                    found->second = loadAppIcon(path);
+            }
+            auto icon = [&](const AppInfo &app) -> std::shared_ptr<void> {
+                auto found = icons.find(app.path);
+                return found == icons.end() ? nullptr : found->second;
+            };
             for (auto &row : data->apps)
-                if (auto found = icons.find(row.app.id); found != icons.end())
-                    row.icon = found->second;
-            if (auto found = icons.find(data->selected.app.id); found != icons.end())
-                data->selected.icon = found->second;
-            for (auto &member : data->members)
-                if (auto found = icons.find(member.app.id); found != icons.end())
-                    member.icon = found->second;
+                row.icon = icon(row.app);
+            data->selected.icon = icon(data->selected.app);
+            if (command.memberIcons)
+                for (auto &member : data->members)
+                    member.icon = icon(member.app);
             for (auto &candidate : data->mergeCandidates)
-                if (auto found = icons.find(candidate.app.id); found != icons.end())
-                    candidate.icon = found->second;
+                candidate.icon = icon(candidate.app);
+            for (auto &view : data->reminders)
+                if (auto found = sources.find(view.rule.app); found != sources.end())
+                    view.icon = icon(*found->second);
             data->paused = latest.paused;
             data->error = error;
             if (PostMessageW(target_, WM_SNAPSHOT, 0, reinterpret_cast<LPARAM>(data.get())))
@@ -382,6 +401,7 @@ void Service::run() {
             }
         }
     } catch (const std::exception &e) {
+        alive_ = false;
         auto data = new Snapshot;
         data->day = localDay(utcNow());
         data->error = L"无法打开数据文件：" + wide(e.what());
@@ -390,6 +410,8 @@ void Service::run() {
     }
     if (SUCCEEDED(apartment))
         CoUninitialize();
+    std::lock_guard lock(mutex_);
     alive_ = false;
+    queue_.clear();
 }
 } // namespace tt

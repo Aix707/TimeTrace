@@ -25,6 +25,11 @@ struct PaintCache {
     std::map<std::shared_ptr<void>, ComPtr<ID2D1Bitmap>, std::owner_less<std::shared_ptr<void>>>
         icons;
     ComPtr<IWICImagingFactory> wic;
+    ComPtr<ID2D1SolidColorBrush> brush;
+    void resetTarget() {
+        icons.clear();
+        brush.Reset();
+    }
 };
 inline std::wstring timeText(Millis value) {
     return formatDuration(value);
@@ -42,14 +47,26 @@ inline D2D1_RECT_F reminderValueRect(float right, float top) {
 struct Canvas {
     ID2D1RenderTarget *rt;
     IDWriteFactory *fonts;
-    ComPtr<ID2D1SolidColorBrush> brush;
+    ComPtr<ID2D1SolidColorBrush> &brush;
     PaintCache &cache;
-    Canvas(ID2D1RenderTarget *r, IDWriteFactory *f, PaintCache &p) : rt(r), fonts(f), cache(p) {
-        rt->CreateSolidColorBrush(color(theme::text), &brush);
+    HRESULT status{S_OK};
+    Canvas(ID2D1RenderTarget *r, IDWriteFactory *f, PaintCache &p)
+        : rt(r), fonts(f), brush(p.brush), cache(p) {
+        if (!rt || !fonts)
+            status = E_POINTER;
+        else if (!brush)
+            status = rt->CreateSolidColorBrush(color(theme::text), &brush);
     }
-    void outline(D2D1_RECT_F r, UINT32 c, float radius = 0) {
+    bool check(HRESULT result) {
+        if (FAILED(result))
+            status = result;
+        return SUCCEEDED(result);
+    }
+    void outline(D2D1_RECT_F r, UINT32 c, float radius = 0, float thickness = 1) {
+        if (FAILED(status))
+            return;
         brush->SetColor(color(c));
-        rt->DrawRoundedRectangle(D2D1::RoundedRect(r, radius, radius), brush.Get(), 1);
+        rt->DrawRoundedRectangle(D2D1::RoundedRect(r, radius, radius), brush.Get(), thickness);
     }
     void card(D2D1_RECT_F r) {
         // A single hairline keeps cards defined without blur surfaces or shadow bitmaps.
@@ -57,6 +74,8 @@ struct Canvas {
         outline(r, theme::border, metrics::groupRadius);
     }
     void fill(D2D1_RECT_F r, UINT32 c, float radius = 0) {
+        if (FAILED(status))
+            return;
         brush->SetColor(color(c));
         if (radius)
             rt->FillRoundedRectangle(D2D1::RoundedRect(r, radius, radius), brush.Get());
@@ -64,15 +83,19 @@ struct Canvas {
             rt->FillRectangle(r, brush.Get());
     }
     void line(float x1, float y1, float x2, float y2, UINT32 c, float thickness = 1) {
+        if (FAILED(status))
+            return;
         brush->SetColor(color(c));
         rt->DrawLine({x1, y1}, {x2, y2}, brush.Get(), thickness);
     }
     void circle(float x, float y, float radius, UINT32 c) {
+        if (FAILED(status))
+            return;
         brush->SetColor(color(c));
         rt->FillEllipse({{x, y}, radius, radius}, brush.Get());
     }
     bool icon(const std::shared_ptr<void> &h, D2D1_RECT_F rect) {
-        if (!h)
+        if (!h || FAILED(status))
             return false;
         auto found = cache.icons.find(h);
         if (found == cache.icons.end()) {
@@ -90,7 +113,7 @@ struct Canvas {
                                              WICBitmapPaletteTypeCustom)))
                 return false;
             ComPtr<ID2D1Bitmap> bitmap;
-            if (FAILED(rt->CreateBitmapFromWicBitmap(converted.Get(), &bitmap)))
+            if (!check(rt->CreateBitmapFromWicBitmap(converted.Get(), &bitmap)))
                 return false;
             if (cache.icons.size() >= 64)
                 cache.icons.erase(cache.icons.begin());
@@ -100,20 +123,27 @@ struct Canvas {
         return true;
     }
     IDWriteTextFormat *font(int size, int weight = 400, int face = 0) {
+        if (FAILED(status))
+            return nullptr;
         auto key = std::make_tuple(size, weight, face);
         auto &format = cache.formats[key];
         if (!format) {
             const wchar_t *family = face == 1   ? L"Segoe Fluent Icons"
                                     : face == 2 ? L"Segoe UI"
                                                 : L"Microsoft YaHei UI";
-            fonts->CreateTextFormat(family, nullptr, static_cast<DWRITE_FONT_WEIGHT>(weight),
-                                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                    static_cast<float>(size), L"zh-CN", &format);
+            if (!check(fonts->CreateTextFormat(
+                    family, nullptr, static_cast<DWRITE_FONT_WEIGHT>(weight),
+                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                    static_cast<float>(size), L"zh-CN", &format)))
+                return nullptr;
             format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
             format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
             ComPtr<IDWriteInlineObject> sign;
-            fonts->CreateEllipsisTrimmingSign(format.Get(), &sign);
+            if (!check(fonts->CreateEllipsisTrimmingSign(format.Get(), &sign))) {
+                format.Reset();
+                return nullptr;
+            }
             format->SetTrimming(&trim, sign.Get());
         }
         return format.Get();
@@ -122,12 +152,17 @@ struct Canvas {
               UINT32 c = theme::text, int weight = 400,
               DWRITE_TEXT_ALIGNMENT align = DWRITE_TEXT_ALIGNMENT_LEADING, int face = 0) {
         auto format = font(size, weight, face);
+        if (!format)
+            return;
         format->SetTextAlignment(align);
         brush->SetColor(color(c));
         rt->DrawTextW(value.c_str(), static_cast<UINT32>(value.size()), format, r, brush.Get(),
                       D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
     void duration(Millis value, D2D1_RECT_F rect) {
+        auto format = font(metrics::title);
+        if (!format)
+            return;
         value = std::max<Millis>(0, value);
         auto minutes = value / 60000, hours = minutes / 60;
         std::wstring text =
@@ -137,10 +172,9 @@ struct Canvas {
             : minutes ? std::to_wstring(minutes) + L" 分钟"
                       : std::to_wstring(value / 1000) + L" 秒";
         ComPtr<IDWriteTextLayout> layout;
-        fonts->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()),
-                                font(metrics::title), rect.right - rect.left,
-                                rect.bottom - rect.top, &layout);
-        if (!layout)
+        if (!check(fonts->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()), format,
+                                           rect.right - rect.left, rect.bottom - rect.top,
+                                           &layout)))
             return;
         layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);

@@ -95,6 +95,8 @@ struct ProcessEntry {
     AppInfo app;
     ExecutableMetadata metadata;
     std::wstring appId;
+    std::wstring resolvedAppId;
+    ResolvedApp resolved;
     ~ProcessEntry() {
         if (handle)
             CloseHandle(handle);
@@ -256,12 +258,16 @@ struct AppResolver::Impl {
                 entry->app.name = L"未识别应用";
             }
         }
-        auto app = entry->app;
         if (appId.empty())
             appId = entry->appId;
-        if (!appId.empty())
-            app.id = "aumid:" + utf8(appId);
-        auto result = catalog_.identify(app, {entry->metadata, appId, !appId.empty()});
+        if (entry->resolved.source.id.empty() || entry->resolvedAppId != appId) {
+            auto app = entry->app;
+            if (!appId.empty())
+                app.id = "aumid:" + utf8(appId);
+            entry->resolved = catalog_.identify(app, {entry->metadata, appId, !appId.empty()});
+            entry->resolvedAppId = appId;
+        }
+        auto result = entry->resolved;
         if (fresh && entry->handle && !entry->app.path.empty()) {
             if (cache_.size() >= 128)
                 cache_.erase(cache_.begin());

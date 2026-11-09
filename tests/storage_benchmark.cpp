@@ -21,8 +21,8 @@ int wmain(int argc, wchar_t **argv) {
                (L"TimeTrace-benchmark-" + std::to_wstring(GetCurrentProcessId()));
     std::filesystem::create_directories(dir);
     try {
-        double seedMs{}, writeMs{}, dayMs{}, weekMs{};
-        Millis check{};
+        double seedMs{}, writeMs{}, dayMs{}, weekMs{}, refreshMs{}, memberMs{};
+        Millis check{}, memberCheck{};
         constexpr Millis start =
             1788220800000; // Fixed synthetic fixture, independent of live data.
         {
@@ -35,6 +35,11 @@ int wmain(int argc, wchar_t **argv) {
                     entries.push_back({"app" + std::to_string(i % 48),
                                        start + d * 86400000LL + i * 60000LL, 5000});
             seedMs = measure(1, [&](int) { db.save(entries); });
+            refreshMs = measure(20, [&](int) {
+                for (int i = 0; i < 48; ++i)
+                    db.registerApp(
+                        {"app" + std::to_string(i), L"App " + std::to_wstring(i), L"test.exe"});
+            });
             auto day = localDay(start + 59 * 86400000LL);
             // Warm all query paths before timing. Each read must produce the same total.
             db.snapshot(day, false);
@@ -47,11 +52,21 @@ int wmain(int argc, wchar_t **argv) {
                 db.commit({{"app0", tick, 2000}, {"app1", tick + 2000, 3000}},
                           {{1, localDay(tick), 3600000, false, false, {}}});
             });
+            for (int i = 1; i < 8; ++i)
+                db.mergeApps("app" + std::to_string(i), "app0");
+            auto details = db.snapshot(day, false, "app0");
+            if (details.members.size() != 8)
+                throw std::runtime_error("Grouped benchmark lost source members");
+            memberMs = measure(200, [&](int) {
+                memberCheck += db.snapshot(day, false, "app0").selectedTotal;
+            });
         }
         std::ofstream out(std::filesystem::path(argv[1]), std::ios::trunc);
         out << "{\"intervals\":72000,\"applications\":48,\"seed_ms\":" << seedMs
             << ",\"commit_ms\":" << writeMs << ",\"daily_query_ms\":" << dayMs
-            << ",\"weekly_query_ms\":" << weekMs << ",\"checksum\":" << check << "}\n";
+            << ",\"weekly_query_ms\":" << weekMs << ",\"checksum\":" << check
+            << ",\"catalog_refresh_ms\":" << refreshMs << ",\"member_query_ms\":" << memberMs
+            << ",\"member_checksum\":" << memberCheck << "}\n";
         if (!out)
             throw std::runtime_error("Cannot write benchmark output");
         std::filesystem::remove(dir / L"data.db");

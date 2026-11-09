@@ -1,0 +1,274 @@
+{
+  "version": "1.4.2",
+  "verification_date": "2026-11-09",
+  "binary_sha256": "75e0f876ef55650e8b01e828ce6929bec03abe3838885a37cdc9c05b3a71041b",
+  "tests": {
+    "core": 241,
+    "integration": 10,
+    "service": 44,
+    "identity": 44,
+    "ui": 46,
+    "notification_actions": 23
+  },
+  "lifecycle": {
+    "cycles": 20,
+    "failures": 0,
+    "native_source_styles": true,
+    "native_source_minimum": true,
+    "native_prompt_metrics": true,
+    "native_window_frame": true,
+    "native_keyboard_navigation": true,
+    "native_reminder_dialog_saved": true,
+    "native_rename_saved": true,
+    "native_merge_saved": true,
+    "native_historical_identity": true,
+    "native_merge_kept_current_identity": true,
+    "native_merge_search_and_selection": true,
+    "native_merge_multiple_records": true,
+    "native_merge_usage_preview": true,
+    "native_merge_explicit_target": true,
+    "native_merge_related_selection": true,
+    "native_members_view": true,
+    "native_primary_changed": true,
+    "native_member_move_cancel": true,
+    "native_member_moved": true,
+    "native_member_remerged": true,
+    "native_device_and_add_saved": true,
+    "native_inline_reminder_edit": true,
+    "native_clear_history_cancel": true,
+    "native_reminder_scroll": true,
+    "autostart_test_skipped": true,
+    "backend_survived_window_close": true,
+    "baseline_gdi_handles": 67,
+    "final_gdi_handles": 67,
+    "baseline_user_handles": 29,
+    "final_user_handles": 28,
+    "private_working_set_after_cycles": 24309760,
+    "warmup_cycles": 7,
+    "measured_cycles": 13,
+    "handle_samples": [
+      [
+        54,
+        19
+      ],
+      [
+        58,
+        20
+      ],
+      [
+        64,
+        21
+      ],
+      [
+        64,
+        21
+      ],
+      [
+        64,
+        21
+      ],
+      [
+        64,
+        21
+      ],
+      [
+        67,
+        29
+      ],
+      [
+        67,
+        29
+      ],
+      [
+        67,
+        29
+      ],
+      [
+        67,
+        29
+      ],
+      [
+        67,
+        29
+      ],
+      [
+        67,
+        28
+      ],
+      [
+        67,
+        28
+      ],
+      [
+        67,
+        28
+      ],
+      [
+        67,
+        28
+      ],
+      [
+        67,
+        28
+      ],
+      [
+        67,
+        28
+      ],
+      [
+        67,
+        28
+      ],
+      [
+        67,
+        28
+      ],
+      [
+        67,
+        28
+      ]
+    ],
+    "passed": true
+  },
+  "data_copy": {
+    "source_opened_read_only": true,
+    "source_schema": 7,
+    "target_schema": 7,
+    "applications": 154,
+    "intervals": 7980,
+    "recorded_milliseconds": 342486231,
+    "unchanged_tables": {
+      "apps": true,
+      "segments": true,
+      "app_labels": true,
+      "app_links": true,
+      "settings": true,
+      "reminder_rules": true,
+      "reminder_states": true
+    },
+    "segments_sha256_before": "ec1064ff3914d95f0ea9288a50e701a4c842e03d9e7a2f83255f0049cfa940ef",
+    "segments_sha256_after": "ec1064ff3914d95f0ea9288a50e701a4c842e03d9e7a2f83255f0049cfa940ef",
+    "total_unchanged": true,
+    "legacy_thresholds_preserved": true,
+    "binary_sha256": "75e0f876ef55650e8b01e828ce6929bec03abe3838885a37cdc9c05b3a71041b",
+    "passed": true
+  },
+  "resource": {
+    "measured_seconds": 59.478572,
+    "warmup_seconds": 120,
+    "samples": 59,
+    "average_cpu_percent": 0.0,
+    "peak_private_working_set_bytes": 4632576.0,
+    "peak_private_commit_bytes": 5869568.0,
+    "private_working_set_growth_bytes": -45056.0,
+    "process_exited_early": false,
+    "ui_opened_during_measurement": false,
+    "clock": "unbiased_interrupt_time",
+    "passed_resource_budget": true
+  },
+  "local_upgrade": {
+    "intervals": 9147,
+    "records_identical_before_startup": true,
+    "tables_verified": {
+      "apps": {
+        "count": 168,
+        "sha256": "8992c550a12850dec483d9510b67d4fa7612394b88dccfaba7e908ae956eb1a0"
+      },
+      "segments": {
+        "count": 9147,
+        "sha256": "63038a87c83a7a947ba46179c5662e5d39cb49d7e2aa80454751b2a188b9be71"
+      },
+      "app_labels": {
+        "count": 3,
+        "sha256": "2640e8995b0c0e2a416a172bc1e31e7a804e14893bdc630c874dbd9da397a69a"
+      },
+      "app_links": {
+        "count": 100,
+        "sha256": "8880b7beda4fff457b87d287f20b687b34346c45c3bd9509d6ef693c16f55a73"
+      },
+      "settings": {
+        "count": 0,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "reminder_rules": {
+        "count": 1,
+        "sha256": "4ca25b4ccaacdea27d6fb5c43aab346e16bc7a881b6ec360eb77bc0eee384314"
+      },
+      "reminder_states": {
+        "count": 15,
+        "sha256": "276f7c91c2ebbbdd6bf106e17841c759d4a5cc81241e3e564a80b566c7af57cd"
+      }
+    },
+    "installed_bytes": 1311839,
+    "files": [
+      {
+        "name": "LICENSE.txt",
+        "bytes": 1209
+      },
+      {
+        "name": "README.md",
+        "bytes": 7129
+      },
+      {
+        "name": "TimeTrace.exe",
+        "bytes": 1250816
+      },
+      {
+        "name": "Uninstall.exe",
+        "bytes": 52685
+      }
+    ],
+    "installed_binary_matches_release": true,
+    "registration_verified": true,
+    "autostart_preserved": true,
+    "background_running": true,
+    "backup_verified": true
+  },
+  "optimization_reference": {
+    "binary_sha256": "c5d1708a03557601df41a0fb371db2554f334ebf1cc9d37d83388fb1186b39da",
+    "benchmark_medians_ms": {
+      "baseline": {
+        "seed_ms": 598.0445,
+        "commit_ms": 0.36773100000000003,
+        "daily_query_ms": 1.442805,
+        "weekly_query_ms": 6.35994,
+        "catalog_refresh_ms": 5.42961,
+        "member_query_ms": 1.809865
+      },
+      "optimized": {
+        "seed_ms": 560.2305,
+        "commit_ms": 0.4272835,
+        "daily_query_ms": 1.4173,
+        "weekly_query_ms": 4.9741800000000005,
+        "catalog_refresh_ms": 2.191605,
+        "member_query_ms": 1.54535
+      }
+    },
+    "paired_time_change_percent": {
+      "seed_ms": -3.1595136700747153,
+      "commit_ms": -6.329947503289074,
+      "daily_query_ms": 1.4178837439553393,
+      "weekly_query_ms": -25.258385457747572,
+      "catalog_refresh_ms": -59.5702364529336,
+      "member_query_ms": -22.51239976955892
+    },
+    "benchmark_fixture": {
+      "applications": 48,
+      "days": 60,
+      "intervals": 72000,
+      "runs": 10,
+      "order": "five baseline-first, five optimized-first"
+    }
+  },
+  "artifacts": {
+    "TimeTrace.exe": {
+      "bytes": 1250816,
+      "sha256": "75e0f876ef55650e8b01e828ce6929bec03abe3838885a37cdc9c05b3a71041b"
+    },
+    "TimeTrace-1.4.2-Setup.exe": {
+      "bytes": 649930,
+      "sha256": "0a2747c03753c247af62caad012d371c6bc13ab058df7ce731314d0e571cf762"
+    }
+  },
+  "passed": true
+}

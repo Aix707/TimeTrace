@@ -2,7 +2,6 @@
 #include "ui_metrics.h"
 #include <commctrl.h>
 #include <algorithm>
-#include <cwctype>
 
 namespace tt::ui {
 namespace {
@@ -22,15 +21,21 @@ bool beginPromptDraw(Prompt &p, HDC dc, const RECT &rect) {
             static_cast<float>(p.dpi), static_cast<float>(p.dpi));
         p.drawFactory->CreateDCRenderTarget(&properties, &p.drawTarget);
     }
-    if (!p.drawTarget || !p.textFactory || FAILED(p.drawTarget->BindDC(dc, &rect)))
+    if (!p.drawTarget || !p.textFactory)
         return false;
+    if (FAILED(p.drawTarget->BindDC(dc, &rect))) {
+        p.paintCache.resetTarget();
+        p.drawTarget.Reset();
+        return false;
+    }
     p.drawTarget->BeginDraw();
     return true;
 }
-void endPromptDraw(Prompt &p) {
-    if (p.drawTarget->EndDraw() == D2DERR_RECREATE_TARGET) {
+void endPromptDraw(Prompt &p, HRESULT drawn) {
+    auto ended = p.drawTarget->EndDraw();
+    if (FAILED(drawn) || FAILED(ended)) {
+        p.paintCache.resetTarget();
         p.drawTarget.Reset();
-        p.paintCache.icons.clear();
     }
 }
 LRESULT CALLBACK sourceButtonProc(HWND window, UINT message, WPARAM w, LPARAM l, UINT_PTR,
@@ -47,11 +52,6 @@ LRESULT CALLBACK sourceButtonProc(HWND window, UINT message, WPARAM w, LPARAM l,
     }
     return DefSubclassProc(window, message, w, l);
 }
-std::wstring folded(std::wstring value) {
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
-    return value;
-}
 int selectedMember(Prompt &p) {
     auto row = ListView_GetNextItem(p.list, -1, LVNI_SELECTED);
     LVITEMW item{};
@@ -62,8 +62,7 @@ int selectedMember(Prompt &p) {
         return -1;
     return static_cast<int>(item.lParam);
 }
-template <typename Row>
-void listImages(Prompt &prompt, const std::vector<Row> &rows, int height, UINT dpi) {
+void listImages(Prompt &prompt, const std::vector<MergeCandidate> &rows, int height, UINT dpi) {
     int icon = MulDiv(metrics::icon, dpi, 96), row = MulDiv(height, dpi, 96) - 2;
     prompt.images =
         ImageList_Create(icon, row, ILC_COLOR24 | ILC_MASK, static_cast<int>(rows.size()), 1);
@@ -109,7 +108,7 @@ void populateMergeList(HWND dialog, Prompt &p) {
     std::wstring query(length + 1, 0);
     GetWindowTextW(p.edit, query.data(), length + 1);
     query.resize(length);
-    query = folded(std::move(query));
+    auto queryKey = applicationNameKey(query);
     p.updatingList = true;
     SendMessageW(p.list, WM_SETREDRAW, FALSE, 0);
     ListView_DeleteAllItems(p.list);
@@ -118,7 +117,7 @@ void populateMergeList(HWND dialog, Prompt &p) {
         auto searchable = candidate.app.name;
         if (candidate.related)
             searchable += L" " + p.appName;
-        if (folded(std::move(searchable)).find(query) == std::wstring::npos)
+        if (applicationNameKey(searchable).find(queryKey) == std::string::npos)
             continue;
         LVITEMW item{};
         item.mask = LVIF_TEXT | LVIF_PARAM | LVIF_GROUPID | LVIF_IMAGE;
@@ -319,7 +318,7 @@ LRESULT CALLBACK promptProc(HWND h, UINT message, WPARAM w, LPARAM l) {
             c.text(L"合计 " + formatDuration(p->baseUsed), {300, 64, 616, 92}, metrics::body,
                    theme::secondary, 400, DWRITE_TEXT_ALIGNMENT_TRAILING);
             c.card({24, sourceListTop, 616, sourceListTop + sourceListHeight});
-            endPromptDraw(*p);
+            endPromptDraw(*p, c.status);
         }
         EndPaint(h, &paint);
         return 0;
@@ -384,7 +383,7 @@ LRESULT CALLBACK promptProc(HWND h, UINT message, WPARAM w, LPARAM l) {
         }
         if (draw->itemState & ODS_FOCUS)
             c.outline({4, 4, width - 4, height - 4}, theme::blue, metrics::radius);
-        endPromptDraw(*p);
+        endPromptDraw(*p, c.status);
         return TRUE;
     }
     if (message == WM_CTLCOLORSTATIC) {

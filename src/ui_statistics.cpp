@@ -38,7 +38,7 @@ void Ui::drawPeriod(ui::Canvas &c, float x, float right, float top) {
     auto arrow = [&](D2D1_RECT_F r, bool next) {
         bool enabled = !next || (weekly_ ? weekStart(day_) < weekStart(localDay(utcNow()))
                                          : day_ < localDay(utcNow()));
-        if (hover_ == static_cast<int>(hits_.size()) && enabled)
+        if (hovered(r) && enabled)
             c.fill(r, theme::hover, size::radius);
         c.symbol(next ? L'\xE76C' : L'\xE76B', r, size::body,
                  enabled ? theme::secondary : 0xC7C7CC);
@@ -131,9 +131,9 @@ void Ui::drawOverview(ui::Canvas &c, float x, float right, float height) {
         if (visible >= capacity)
             break;
         D2D1_RECT_F rect{x - 8, y, right + 8, y + size::row};
-        if (hover_ == static_cast<int>(hits_.size()))
+        if (hovered(rect))
             c.fill(rect, theme::hover, size::radius);
-        applicationIcon(c, &row, {x, y + 16, x + size::icon, y + 16 + size::icon});
+        applicationIcon(c, row.icon, {x, y + 16, x + size::icon, y + 16 + size::icon});
         c.text(row.app.name, {x + 56, y + 8, x + std::min(276.0f, (right - x) * .30f), y + 56},
                size::body);
         float trackLeft = x + std::min(300.0f, (right - x) * .34f), trackRight = right - 212;
@@ -231,7 +231,8 @@ void Ui::drawDetail(ui::Canvas &c, float x, float right, float height) {
             }
     linkButton(c, ui::controlRect(x + size::compactWidth, barTop, size::compactWidth), L"返回",
                100);
-    applicationIcon(c, chosen, {x + 96, barTop + 2, x + 128, barTop + 34});
+    applicationIcon(c, chosen ? chosen->icon : nullptr,
+                    {x + 96, barTop + 2, x + 128, barTop + 34});
     c.text(chosen ? chosen->app.name : L"应用详情",
            {x + 144, barTop, right - 276, barTop + size::control}, size::title, theme::text, 600);
     button(c, ui::controlRect(right - size::actionWidth - size::gap, barTop), L"重命名", 212,

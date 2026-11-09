@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <dwmapi.h>
+#include <optional>
 #include <shellapi.h>
 #include <utility>
 #include <wincodec.h>
@@ -40,6 +41,7 @@ void Ui::factories() {
 void Ui::show(bool reminders) {
     if (reminders && page_ != 1) {
         pendingMerge_.clear();
+        pendingMembers_.clear();
         page_ = 1;
         scroll_ = 0;
     }
@@ -84,25 +86,34 @@ void Ui::close() {
         DestroyWindow(window_);
 }
 void Ui::update(Snapshot s) {
-    if (!window_ || (s.request && s.request != request_))
-        return;
     if (!s.request && !s.error.empty()) {
-        snapshot_.error = std::move(s.error);
-        InvalidateRect(window_, nullptr, FALSE);
+        serviceError_ = std::move(s.error);
+        if (visible())
+            InvalidateRect(window_, nullptr, FALSE);
         return;
     }
+    if (!window_ || (s.request && s.request != request_))
+        return;
+    if (s.request)
+        serviceError_.clear();
     snapshot_ = std::move(s);
     if (page_ == 3 && !snapshot_.selected.app.id.empty())
         selected_ = snapshot_.selected.app.id;
     std::string readyMerge;
     if (!pendingMerge_.empty() && snapshot_.mergeFor == pendingMerge_)
         readyMerge = std::exchange(pendingMerge_, {});
+    std::string readyMembers;
+    if (!pendingMembers_.empty() && snapshot_.memberIcons &&
+        snapshot_.selected.app.id == pendingMembers_)
+        readyMembers = std::exchange(pendingMembers_, {});
     std::erase_if(paintCache_.icons, [](const auto &item) { return item.first.use_count() == 1; });
     refreshVisibleIcons();
     if (visible())
         InvalidateRect(window_, nullptr, FALSE);
     if (!readyMerge.empty())
         promptApp(readyMerge, true);
+    if (!readyMembers.empty())
+        promptMembers(readyMembers);
 }
 int Ui::listCapacity(float height) const {
     if (page_ == 3)
@@ -167,6 +178,7 @@ void Ui::request() {
     c.day = day_;
     c.weekly = weekly_;
     c.mergeFor = pendingMerge_;
+    c.memberIcons = !pendingMembers_.empty();
     if (page_ == 3)
         c.app = selected_;
     RECT client{};
@@ -200,15 +212,10 @@ void Ui::paint() {
         if (target_) {
             auto extent = target_->GetSize();
             target_->BeginDraw();
-            draw(target_.Get(), extent.width, extent.height);
-            if (focus_ >= 0 && focus_ < static_cast<int>(hits_.size())) {
-                ComPtr<ID2D1SolidColorBrush> brush;
-                target_->CreateSolidColorBrush(color(theme::blue), &brush);
-                target_->DrawRoundedRectangle(D2D1::RoundedRect(hits_[focus_].rect, 6, 6),
-                                              brush.Get(), 2);
-            }
-            if (target_->EndDraw() == D2DERR_RECREATE_TARGET) {
-                paintCache_.icons.clear();
+            auto drawn = draw(target_.Get(), extent.width, extent.height);
+            auto ended = target_->EndDraw();
+            if (FAILED(drawn) || FAILED(ended)) {
+                paintCache_.resetTarget();
                 target_.Reset();
             }
         }
@@ -226,9 +233,13 @@ int Ui::hitAt(float x, float y) const {
     }
     return -1;
 }
+bool Ui::hovered(D2D1_RECT_F rect) const {
+    return pointer_.x >= rect.left && pointer_.x <= rect.right && pointer_.y >= rect.top &&
+           pointer_.y <= rect.bottom;
+}
 void Ui::button(Canvas &c, D2D1_RECT_F r, const std::wstring &label, int action, std::string app,
                 bool primary, bool danger) {
-    bool hover = hover_ == static_cast<int>(hits_.size());
+    bool hover = hovered(r);
     if (primary)
         c.fill(r, hover ? 0x006BE0 : theme::blue, size::radius);
     else {
@@ -257,12 +268,13 @@ void Ui::segments(Canvas &c, D2D1_RECT_F r, const std::vector<std::wstring> &lab
         c.text(labels[i], item, size::body,
                static_cast<int>(i) == selected ? theme::blue : theme::secondary,
                static_cast<int>(i) == selected ? 600 : 400, DWRITE_TEXT_ALIGNMENT_CENTER);
-        hits_.push_back({item, firstAction + static_cast<int>(i), {}});
+        hits_.push_back({item, firstAction + static_cast<int>(i), {}, 0, 0,
+                         firstAction == 100 ? Hit::Navigation : Hit::Control});
     }
 }
 void Ui::linkButton(Canvas &c, D2D1_RECT_F r, const std::wstring &label, int action,
                     std::string app, bool danger, bool disclosure) {
-    if (hover_ == static_cast<int>(hits_.size()))
+    if (hovered(r))
         c.fill(r, danger ? theme::redTint : theme::hover, size::radius);
     auto labelRect = r;
     if (disclosure) {
@@ -279,8 +291,8 @@ void Ui::toggle(Canvas &c, D2D1_RECT_F r, bool enabled, int action) {
     c.circle(enabled ? r.right - 12 : r.left + 12, (r.top + r.bottom) / 2, 9, theme::surface);
     hits_.push_back({{r.left - 12, r.top - 6, r.right + 8, r.bottom + 6}, action, {}});
 }
-void Ui::applicationIcon(Canvas &c, const AppRow *row, D2D1_RECT_F r) {
-    if (row && c.icon(row->icon, r))
+void Ui::applicationIcon(Canvas &c, const std::shared_ptr<void> &icon, D2D1_RECT_F r) {
+    if (c.icon(icon, r))
         return;
     c.symbol(L'\xE8A5', r, size::title, theme::tertiary);
 }
@@ -307,8 +319,20 @@ void Ui::drawSettings(Canvas &c, float x, float right) {
     c.text(L"仅存本机，不采集标题、网址、输入内容或截图。", {x + 4, 616, right, 644}, size::body,
            theme::secondary);
 }
-void Ui::draw(ID2D1RenderTarget *rt, float width, float height) {
+HRESULT Ui::draw(ID2D1RenderTarget *rt, float width, float height) {
     Canvas c(rt, textFactory_.Get(), paintCache_);
+    if (FAILED(c.status))
+        return c.status;
+    std::optional<Hit> focused;
+    if (focus_ >= 0 && focus_ < static_cast<int>(hits_.size()))
+        focused = hits_[focus_];
+    pointer_ = {-1, -1};
+    POINT cursor{};
+    if (window_ && GetCursorPos(&cursor) && WindowFromPoint(cursor) == window_) {
+        ScreenToClient(window_, &cursor);
+        float scale = GetDpiForWindow(window_) / 96.0f;
+        pointer_ = {cursor.x / scale, cursor.y / scale};
+    }
     rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
     rt->Clear(color(theme::surface));
     hits_.clear();
@@ -321,16 +345,17 @@ void Ui::draw(ID2D1RenderTarget *rt, float width, float height) {
                                L'\xE8BB'};
     for (int i = 0; i < 3; ++i) {
         D2D1_RECT_F r{width - 146 + i * 46.0f, 14, width - 100 + i * 46.0f, 50};
-        bool hover = hover_ == static_cast<int>(hits_.size());
+        bool hover = hovered(r);
         if (hover)
             c.fill(r, i == 2 ? theme::red : theme::hover, 5);
         c.symbol(symbols[i], r, size::body, hover && i == 2 ? theme::surface : theme::text);
         hits_.push_back({r, 900 + i, {}});
     }
     float pad = std::clamp(width * .05f, 32.0f, 72.0f), x = pad, right = width - pad;
-    if (!snapshot_.error.empty()) {
+    const auto &error = serviceError_.empty() ? snapshot_.error : serviceError_;
+    if (!error.empty()) {
         c.fill({pad, 65, width - pad, 91}, theme::redTint, 6);
-        c.text(snapshot_.error, {pad + 8, 65, width - pad - 8, 91}, size::body, theme::red);
+        c.text(error, {pad + 8, 65, width - pad - 8, 91}, size::body, theme::red);
     }
     if (page_ == 1 || page_ == 2) {
         x = std::max(pad, (width - size::contentWidth) / 2);
@@ -339,12 +364,24 @@ void Ui::draw(ID2D1RenderTarget *rt, float width, float height) {
             drawReminders(c, x, right, height);
         else
             drawSettings(c, x, right);
-        return;
-    }
-    if (page_ == 3)
+    } else if (page_ == 3)
         drawDetail(c, x, right, height);
     else
         drawOverview(c, x, right, height);
+    focus_ = -1;
+    if (focused) {
+        auto found = std::find_if(hits_.begin(), hits_.end(),
+                                  [&](const auto &hit) { return hit.sameControl(*focused); });
+        if (found != hits_.end())
+            focus_ = static_cast<int>(found - hits_.begin());
+    }
+    hover_ = hitAt(pointer_.x, pointer_.y);
+    if (focus_ >= 0) {
+        const auto &rect = hits_[focus_].rect;
+        if (rect.bottom > rect.top)
+            c.outline(rect, theme::blue, 6, 2);
+    }
+    return c.status;
 }
 void Ui::promptReminder(const std::string &app, bool device, bool chooseApp) {
     Prompt p;
@@ -391,13 +428,11 @@ void Ui::promptApp(const std::string &app, bool merge) {
     p.kind = merge ? Prompt::Merge : Prompt::Rename;
     if (snapshot_.selected.app.id == app) {
         p.appName = snapshot_.selected.app.name;
-        p.appPath = snapshot_.selected.app.path;
         p.baseUsed = snapshot_.selectedTotal;
     } else
         for (const auto &candidate : snapshot_.catalog)
             if (candidate.id == app) {
                 p.appName = candidate.name;
-                p.appPath = candidate.path;
             }
     if (merge) {
         p.mergeCandidates = std::move(snapshot_.mergeCandidates);
@@ -439,10 +474,14 @@ bool Ui::confirmName(const std::string &app, const std::wstring &name, bool &con
 void Ui::promptMembers(const std::string &app) {
     if (snapshot_.members.empty() || snapshot_.selected.app.id != app)
         return;
+    if (!snapshot_.memberIcons) {
+        pendingMembers_ = app;
+        request();
+        return;
+    }
     Prompt p;
     p.kind = Prompt::GroupMembers;
     p.appName = snapshot_.selected.app.name;
-    p.appPath = snapshot_.selected.app.path;
     p.baseUsed = snapshot_.selectedTotal;
     p.members = snapshot_.members;
     if (!showPrompt(window_, p) || !service_)
@@ -489,13 +528,15 @@ void Ui::promptMembers(const std::string &app) {
     service_->send(std::move(command));
     request();
 }
-void Ui::act(const Hit &h) {
+void Ui::act(Hit h) {
     if (!h.action)
         return;
     hover_ = -1;
     focus_ = -1;
     if (h.action != 213)
         pendingMerge_.clear();
+    if (h.action != 217)
+        pendingMembers_.clear();
     if (h.action >= 100 && h.action <= 102) {
         page_ = h.action - 100;
         scroll_ = 0;
@@ -674,15 +715,16 @@ LRESULT CALLBACK Ui::proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_SIZE:
         if (w == SIZE_MINIMIZED)
             return 0;
-        if (self->target_) {
-            self->target_->Resize(D2D1::SizeU(LOWORD(l), HIWORD(l)));
+        if (self->target_ && FAILED(self->target_->Resize(D2D1::SizeU(LOWORD(l), HIWORD(l))))) {
+            self->paintCache_.resetTarget();
+            self->target_.Reset();
         }
         self->refreshVisibleIcons();
         InvalidateRect(h, nullptr, FALSE);
         return 0;
     case WM_DPICHANGED: {
         auto r = reinterpret_cast<RECT *>(l);
-        self->paintCache_.icons.clear();
+        self->paintCache_.resetTarget();
         self->target_.Reset();
         SetWindowPos(h, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top,
                      SWP_NOZORDER | SWP_NOACTIVATE);
@@ -697,10 +739,8 @@ LRESULT CALLBACK Ui::proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_LBUTTONUP: {
         float scale = GetDpiForWindow(h) / 96.0f, x = GET_X_LPARAM(l) / scale,
               y = GET_Y_LPARAM(l) / scale;
-        if (auto index = self->hitAt(x, y); index >= 0) {
-            auto copy = self->hits_[index];
-            self->act(copy);
-        }
+        if (auto index = self->hitAt(x, y); index >= 0)
+            self->act(self->hits_[index]);
         return 0;
     }
     case WM_MOUSEMOVE: {
@@ -806,8 +846,7 @@ LRESULT CALLBACK Ui::proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         }
         if ((w == VK_RETURN || w == VK_SPACE) && self->focus_ >= 0 &&
             self->focus_ < static_cast<int>(self->hits_.size())) {
-            auto hit = self->hits_[self->focus_];
-            self->act(hit);
+            self->act(self->hits_[self->focus_]);
             return 0;
         }
         if (w == VK_ESCAPE && self->page_ == 3) {
@@ -821,6 +860,7 @@ LRESULT CALLBACK Ui::proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_DESTROY:
         self->window_ = nullptr;
         self->pendingMerge_.clear();
+        self->pendingMembers_.clear();
         self->paintCache_ = {};
         self->snapshot_ = {};
         self->requestedIconApps_.clear();
@@ -863,9 +903,12 @@ bool Ui::renderPng(const std::filesystem::path &path, Snapshot snapshot, int pag
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96, 96);
     if (FAILED(factory_->CreateWicBitmapRenderTarget(bitmap.Get(), props, &rt)))
         return false;
+    paintCache_.resetTarget();
     rt->BeginDraw();
-    draw(rt.Get(), static_cast<float>(width), static_cast<float>(height));
-    if (FAILED(rt->EndDraw()))
+    auto drawn = draw(rt.Get(), static_cast<float>(width), static_cast<float>(height));
+    auto ended = rt->EndDraw();
+    paintCache_.resetTarget();
+    if (FAILED(drawn) || FAILED(ended))
         return false;
     ComPtr<IWICStream> stream;
     if (FAILED(wic->CreateStream(&stream)) ||

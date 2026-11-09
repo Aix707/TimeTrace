@@ -211,16 +211,12 @@ void shortcutProducts(std::vector<IdentityProduct> &products, REFKNOWNFOLDERID f
                                     return !targetPath.empty() && p.primaryPath == targetPath &&
                                            p.appId == appId;
                                 });
-                            if (existing != products.end()) {
-                                existing->targets.push_back(targetPath);
-                            } else {
+                            if (existing == products.end()) {
                                 IdentityProduct p;
                                 p.key = "shortcut:" + utf8(identityPath(current.wstring()));
                                 p.name = current.stem().wstring();
                                 p.primaryPath = targetPath;
                                 p.appId = appId;
-                                if (!targetPath.empty())
-                                    p.targets.push_back(targetPath);
                                 products.push_back(std::move(p));
                             }
                         }
@@ -322,21 +318,26 @@ struct IdentityCatalog::Impl {
     std::vector<IdentityProduct> products;
     std::unordered_map<std::wstring, std::wstring> shellNames;
     std::unordered_map<std::wstring, ExecutableMetadata> primaryMetadata;
+    std::wstring windowsRoot;
     bool system{};
     explicit Impl(std::vector<IdentityProduct> entries, bool load)
         : products(std::move(entries)), system(load) {
+        wchar_t windowsDirectory[MAX_PATH]{};
+        if (GetWindowsDirectoryW(windowsDirectory, MAX_PATH))
+            windowsRoot = identityPath(windowsDirectory);
         if (load) {
             registeredProducts(products, HKEY_CURRENT_USER, KEY_WOW64_64KEY, "user");
             registeredProducts(products, HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY, "machine64");
             registeredProducts(products, HKEY_LOCAL_MACHINE, KEY_WOW64_32KEY, "machine32");
             shortcutProducts(products, FOLDERID_Programs);
             shortcutProducts(products, FOLDERID_CommonPrograms);
-        }
-        for (auto &p : products) {
-            p.root = identityPath(p.root);
-            p.primaryPath = identityPath(p.primaryPath);
-            for (auto &target : p.targets)
-                target = identityPath(target);
+        } else {
+            for (auto &p : products) {
+                p.root = identityPath(p.root);
+                p.primaryPath = identityPath(p.primaryPath);
+                for (auto &target : p.targets)
+                    target = identityPath(target);
+            }
         }
     }
 };
@@ -390,9 +391,7 @@ ResolvedApp IdentityCatalog::identify(const AppInfo &source, const IdentityConte
         // An unverified historical AppID may refer to a separate browser app.
         return result;
     }
-    wchar_t windowsDirectory[MAX_PATH]{};
-    if (GetWindowsDirectoryW(windowsDirectory, MAX_PATH) &&
-        inside(path, identityPath(windowsDirectory))) {
+    if (inside(path, impl_->windowsRoot)) {
         // Folder and script shortcuts can target shared Windows executables.
         // Their shortcut labels do not identify the foreground host application.
         result.evidence = "system-executable";
@@ -551,9 +550,7 @@ std::vector<MergeCandidate> IdentityCatalog::mergeCandidates(const std::vector<A
             if (root.empty() && !path.empty())
                 root = std::filesystem::path(path).parent_path().wstring();
         }
-        wchar_t windowsDirectory[MAX_PATH]{};
-        if (!specificRoot(root) || (GetWindowsDirectoryW(windowsDirectory, MAX_PATH) &&
-                                    inside(path, identityPath(windowsDirectory))))
+        if (!specificRoot(root) || inside(path, impl_->windowsRoot))
             root.clear();
     }
     std::vector<MergeCandidate> result;

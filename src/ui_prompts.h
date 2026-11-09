@@ -8,7 +8,7 @@ struct Prompt {
     HWND edit{}, combo{}, list{}, related{}, count{}, detail{};
     HFONT font{};
     HIMAGELIST images{};
-    std::wstring appName, appPath, text;
+    std::wstring appName, text;
     Millis baseUsed{};
     int minutes{60}, result{-1};
     bool device{}, accepted{};

@@ -19,6 +19,8 @@ if ($LASTEXITCODE) { throw 'Integration tests failed.' }
 if ($LASTEXITCODE) { throw 'Service queue tests failed.' }
 & "$taskRoot\build\Release\identity_tests.exe" | Tee-Object -FilePath "$taskRoot\test-output\$taskTag-identity-tests.log"
 if ($LASTEXITCODE) { throw 'Application identity tests failed.' }
+& "$taskRoot\build\Release\ui_tests.exe" | Tee-Object -FilePath "$taskRoot\test-output\$taskTag-ui-tests.log"
+if ($LASTEXITCODE) { throw 'Native UI state tests failed.' }
 & "$taskRoot\build\Release\reminder_actions_probe.exe" "$taskRoot\build\Release\TimeTrace.exe" "$taskRoot\test-output\$taskTag-actions.json"
 if ($LASTEXITCODE) { throw 'Notification action tests failed.' }
 $taskBuildHash = (Get-FileHash -LiteralPath "$taskRoot\build\Release\TimeTrace.exe" -Algorithm SHA256).Hash

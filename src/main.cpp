@@ -293,14 +293,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             return tt::registerShortcut() ? 0 : 4;
         if (install)
             return tt::repairInstallation(tt::executablePath()) ? 0 : 4;
-        // Only an installed, normal profile repairs global integration. Isolated test and
-        // preview profiles must never take ownership of the user's shortcuts or protocols.
-        if (directory.empty() && render.empty() && !stop && !pause && !resume) {
-            std::error_code error;
-            if (std::filesystem::is_regular_file(
-                    tt::executablePath().parent_path() / L"Uninstall.exe", error))
-                tt::repairInstallation(tt::executablePath());
-        }
+        const bool installedProfile = directory.empty();
         if (directory.empty())
             directory = tt::dataPath();
         directory = std::filesystem::absolute(directory).lexically_normal();
@@ -317,10 +310,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             s.reminders = engine.views();
             for (auto &view : s.reminders) {
                 for (const auto &app : s.catalog)
-                    if (app.id == view.rule.app)
+                    if (app.id == view.rule.app) {
                         view.name = app.name;
-                if (view.name.empty() && view.rule.kind == tt::ReminderKind::App)
-                    view.name = db.displayName(view.rule.app);
+                        view.icon = tt::loadAppIcon(app.path);
+                    }
+                if (view.name.empty() && view.rule.kind == tt::ReminderKind::App) {
+                    std::wstring path;
+                    view.name = db.displayName(view.rule.app, &path);
+                    view.icon = tt::loadAppIcon(path);
+                }
             }
             for (auto &row : s.apps)
                 row.icon = tt::loadAppIcon(row.app.path);
@@ -400,6 +398,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             if (mutex)
                 CloseHandle(mutex);
             return other ? 0 : existing ? 5 : 2;
+        }
+        // Repair installed-profile integration only in the new primary instance.
+        if (installedProfile) {
+            std::error_code error;
+            if (std::filesystem::is_regular_file(
+                    tt::executablePath().parent_path() / L"Uninstall.exe", error))
+                tt::repairInstallation(tt::executablePath());
         }
         Application state;
         application = &state;

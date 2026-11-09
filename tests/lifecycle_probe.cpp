@@ -185,7 +185,7 @@ int wmain(int argc, wchar_t **argv) {
          memberMovePassed = false, memberRemergePassed = false;
     bool reminderSaved = false, renamed = false, merged = false, settingsVisited = false,
          deviceSaved = false, addedSaved = false;
-    constexpr int warmupCycles = 7, measuredCycles = 12;
+    constexpr int warmupCycles = 7, measuredCycles = 13;
     for (int i = 0; i < warmupCycles + measuredCycles; i++) {
         wait(launch(exe, args));
         HWND window{};

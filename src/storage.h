@@ -19,7 +19,7 @@ class Storage {
     Snapshot snapshot(const std::string &day, bool weekly, const std::string &selected = {});
     const std::vector<AppInfo> &applications();
     std::vector<AppInfo> identitySources();
-    std::wstring displayName(const std::string &app);
+    std::wstring displayName(const std::string &app, std::wstring *path = nullptr);
     void renameApp(const std::string &app, const std::wstring &name, bool combine = false);
     void mergeApps(const std::string &source, const std::string &target);
     void mergeApps(const std::vector<std::string> &sources, const std::string &target);
@@ -43,7 +43,7 @@ class Storage {
     sqlite3 *db_{};
     std::optional<std::vector<AppInfo>> catalog_;
     std::string canonicalId(const std::string &app);
-    void upsertApp(const AppInfo &app);
+    bool upsertApp(const AppInfo &app);
     void checkName(const std::string &group, const std::wstring &name, bool combine);
     void mergeRoots(const std::string &source, const std::string &target, bool manual);
     void regroupNames(const std::string &preferred = {});
