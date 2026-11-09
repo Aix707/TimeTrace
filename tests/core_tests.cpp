@@ -7,6 +7,7 @@
 #include <iostream>
 #include <numeric>
 #include <stdexcept>
+#include <thread>
 using namespace tt;
 namespace {
 int checks{};
@@ -775,141 +776,8 @@ void groupManagementTests(const std::filesystem::path &dir) {
                     snapshot.members[1].app.id == "b",
                 "Member details omit empty synthetic aliases without source metadata or usage");
     }
-    file = dir / L"schema5.db";
-    {
-        Storage db(file);
-        db.app({"source", L"Source", L"source.exe"});
-        db.app({"group", L"Group", L"group.exe"});
-        db.save({{"source", base, 1234}});
-        db.mergeApps("source", "group");
-        db.renameApp("group", L"Custom group");
-    }
-    rawSql(file, "ALTER TABLE apps DROP COLUMN separate_from;PRAGMA user_version=5;");
-    {
-        Storage db(file);
-        require(
-            scalar(file, "PRAGMA user_version") == 7 &&
-                scalar(file, "SELECT COUNT(*) FROM apps WHERE separate_from<>''") == 0 &&
-                db.appMappings()["source"] == "group" &&
-                db.snapshot(day, false, "group").selectedTotal == 1234 &&
-                db.snapshot(day, false, "group").selected.app.name == L"Custom group",
-            "Schema five upgrades to seven with existing names, mappings, and raw usage preserved");
-    }
 }
-void migrationTests(const std::filesystem::path &dir) {
-    for (int version : {1, 2}) {
-        auto file = dir / (L"v" + std::to_wstring(version) + L".db");
-        {
-            Storage db(file);
-            for (auto id : {"a", "b", "c"})
-                db.app({id, wide(id), {}});
-            db.save({{"a", 1700000000000, 1000}, {"b", 1700000001000, 2000}});
-        }
-        rawSql(file,
-               "DROP TABLE reminder_states;DROP TABLE reminder_rules;"
-               "CREATE TABLE limits(app TEXT PRIMARY KEY,duration INTEGER NOT NULL);"
-               "CREATE TABLE notices(app TEXT,day TEXT,next INTEGER,muted INTEGER,PRIMARY "
-               "KEY(app,day));"
-               "INSERT INTO limits "
-               "VALUES('a',60000),('b',120000);INSERT INTO notices "
-               "VALUES('a','2026-10-17',0,1),('b','2026-10-17',420000,0);PRAGMA user_version=" +
-                   std::to_string(version) + ";");
-        if (version == 1)
-            rawSql(file, "DROP TABLE app_labels;DROP TABLE app_links;");
-        else
-            rawSql(file, "INSERT INTO app_labels VALUES('b','custom');INSERT INTO app_links "
-                         "(app,target) VALUES('c','b');");
-        Storage db(file);
-        require(scalar(file, "PRAGMA user_version") == 7, "Schema one and two upgrade to seven");
-        require(
-            scalar(file, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('limits','notices')") ==
-                0,
-            "Legacy tables removed after conversion");
-        require(scalar(file, "SELECT COUNT(*) FROM segments") == 2 &&
-                    scalar(file, "SELECT SUM(duration) FROM segments") == 3000,
-                "Upgrade retains every raw interval and total");
-        auto rules = db.reminderRules();
-        require(rules.size() == 3 && rules[1].threshold == 60000 && rules[2].threshold == 120000 &&
-                    !rules[0].enabled,
-                "Legacy durations migrate and device stays off");
-        auto states = db.reminderStates("2026-10-17");
-        require(states.size() == 2 && states[0].muted && states[1].next == 420000,
-                "Legacy daily mute and snooze retained");
-        ReminderEngine e("migrate");
-        e.load(rules, states, {{"a", 600000}, {"b", 419999}}, "2026-10-17", true);
-        require(e.evaluate(true).empty(), "Migration does not repeat reminder");
-        e.add("b", 1);
-        require(e.evaluate(true).size() == 1, "Migrated snooze reaches exact threshold");
-        if (version == 2)
-            require(db.appMappings()["c"] == "b" && db.applications()[1].name == L"custom",
-                    "Schema two labels and groups preserved");
-    }
-    auto grouped = dir / L"legacy-grouped.db";
-    rawSql(grouped,
-           "CREATE TABLE apps(id TEXT PRIMARY KEY,name TEXT NOT NULL,path TEXT NOT NULL);"
-           "CREATE TABLE segments(id INTEGER PRIMARY KEY,app TEXT,start INTEGER,end INTEGER,"
-           "duration INTEGER,day TEXT,hour INTEGER);"
-           "CREATE TABLE app_links(app TEXT PRIMARY KEY,target TEXT NOT NULL);"
-           "CREATE TABLE limits(app TEXT PRIMARY KEY,duration INTEGER NOT NULL);"
-           "CREATE TABLE notices(app TEXT,day TEXT,next INTEGER,muted INTEGER,"
-           "PRIMARY KEY(app,day));"
-           "INSERT INTO apps VALUES('alias','Alias',''),('target','Target',''),"
-           "('other','Other',''),('other-target','Other Target','');"
-           "INSERT INTO app_links VALUES('alias','target'),('other','other-target');"
-           "INSERT INTO segments VALUES(1,'alias',0,20000,20000,'2026-10-17',12),"
-           "(2,'target',20000,60000,40000,'2026-10-17',12),"
-           "(3,'other',60000,90000,30000,'2026-10-17',12),"
-           "(4,'other-target',90000,100000,10000,'2026-10-17',12),"
-           "(5,'alias',100000,110000,10000,'2026-10-19',12),"
-           "(6,'target',110000,140000,30000,'2026-10-19',12);"
-           "INSERT INTO limits VALUES('alias',120000),('target',60000),('other',90000);"
-           "INSERT INTO notices VALUES('alias','2026-10-17',320000,0),"
-           "('target','2026-10-17',200000,0),('other','2026-10-17',330000,0),"
-           "('alias','2026-10-18',0,1),('target','2026-10-18',200000,0),"
-           "('target','2026-10-19',340000,0);"
-           "PRAGMA user_version=2;");
-    {
-        Storage db(grouped);
-        require(
-            scalar(grouped, "SELECT duration FROM reminder_rules WHERE app='target'") == 60000 &&
-                scalar(grouped, "SELECT duration FROM reminder_rules WHERE app='other-target'") ==
-                    90000,
-            "Grouped legacy migration prioritizes target settings and inherits source-only rules");
-        auto states = db.reminderStates("2026-10-17");
-        auto ruleFor = [&](const std::string &app) {
-            auto rules = db.reminderRules();
-            auto found = std::find_if(rules.begin(), rules.end(),
-                                      [&](const auto &rule) { return rule.app == app; });
-            return found == rules.end() ? int64_t{} : found->id;
-        };
-        auto targetRule = ruleFor("target"), otherRule = ruleFor("other-target");
-        auto stateFor = [&](int64_t rule) {
-            auto found = std::find_if(states.begin(), states.end(),
-                                      [&](const auto &state) { return state.rule == rule; });
-            return found == states.end() ? ReminderState{} : *found;
-        };
-        require(stateFor(targetRule).next == 360000 && stateFor(otherRule).next == 340000,
-                "Grouped legacy snoozes retain their remaining actual-use time");
-        auto nextDay = db.reminderStates("2026-10-18");
-        require(nextDay.size() == 1 && nextDay.front().rule == targetRule && nextDay.front().muted,
-                "Alias silence is retained when target and source both have legacy notices");
-        auto targetOnly = db.reminderStates("2026-10-19");
-        require(targetOnly.size() == 1 && targetOnly.front().next == 340000,
-                "Canonical legacy snooze thresholds are not extended by existing aliases");
-        require(scalar(grouped, "SELECT COUNT(*) FROM segments") == 6 &&
-                    scalar(grouped, "SELECT SUM(duration) FROM segments") == 140000,
-                "Grouped legacy state migration preserves every original interval");
-        ReminderEngine engine("legacy-grouped");
-        engine.load(db.reminderRules(), states, db.dailyUsage("2026-10-17"), "2026-10-17", true);
-        engine.add("target", 299999);
-        require(engine.evaluate(true).empty(),
-                "Grouped legacy reminder waits for the preserved snooze remainder");
-        engine.add("target", 1);
-        auto events = engine.evaluate(true);
-        require(events.size() == 1 && events.front().rule.id == targetRule,
-                "Grouped legacy snooze fires at its exact combined-use boundary");
-    }
-    std::filesystem::remove(grouped);
+void corruptDatabaseTests(const std::filesystem::path &dir) {
     auto file = dir / L"corrupt.db";
     {
         std::ofstream f(file);
@@ -928,6 +796,122 @@ void migrationTests(const std::filesystem::path &dir) {
     require(content == "this is not a SQLite database", "Corrupt data unchanged");
     require(std::filesystem::remove(file), "Corrupt handle released");
 }
+void databaseFormatTests(const std::filesystem::path &dir) {
+    const char *objects = "SELECT COUNT(*) FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*'";
+    auto bytes = [](const std::filesystem::path &path) {
+        std::ifstream input(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(input), {});
+    };
+    for (const auto *name : {L"new-format.db", L"blank-format.db", L"empty-format.db"}) {
+        auto file = dir / name;
+        if (std::wstring(name) == L"blank-format.db")
+            std::ofstream(file).close();
+        if (std::wstring(name) == L"empty-format.db")
+            rawSql(file, "PRAGMA user_version=0;");
+        {
+            Storage db(file);
+            require(scalar(file, "PRAGMA user_version") == 7 &&
+                        scalar(file, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' "
+                                     "AND name NOT GLOB 'sqlite_*'") == 7,
+                    "An empty profile creates exactly the current seven business tables");
+            require(scalar(file, "SELECT COUNT(*) FROM pragma_table_info('apps') WHERE name IN "
+                                 "('id','name','path','has_usage','separate_from','resolved_name',"
+                                 "'name_key','identified')") == 8 &&
+                        scalar(file, "SELECT COUNT(*) FROM sqlite_schema WHERE name IN "
+                                     "('segments_day','apps_name_key','app_links_target',"
+                                     "'reminder_device')") == 4,
+                    "Current source fields and indexes are created together");
+            auto rules = db.reminderRules();
+            require(rules.size() == 1 && rules[0].kind == ReminderKind::Device &&
+                        rules[0].threshold == 3600000 && !rules[0].enabled,
+                    "A new profile has one disabled sixty-minute device reminder");
+            db.app({"source", L"Current source", L"source.exe"});
+            db.save({{"source", 1700000000000, 1234}});
+            db.setSetting("format-test", "retained");
+        }
+        {
+            Storage db(file);
+            require(db.snapshot(localDay(1700000000000), false).total == 1234 &&
+                        db.getSetting("format-test") == "retained" &&
+                        db.reminderRules().size() == 1,
+                    "Reopening schema seven preserves records and creates no extra defaults");
+        }
+        std::filesystem::remove(file);
+    }
+    for (int version : {0, 1, 2, 3, 4, 5, 6, 8, 99}) {
+        auto file = dir / (L"unsupported-" + std::to_wstring(version) + L".db");
+        rawSql(file, "CREATE TABLE sqliteX(value TEXT);INSERT INTO sqliteX VALUES('keep');"
+                     "PRAGMA user_version=" + std::to_string(version) + ";");
+        auto original = bytes(file);
+        bool rejected = false;
+        try {
+            Storage db(file);
+        } catch (const std::exception &) {
+            rejected = true;
+        }
+        require(rejected && bytes(file) == original &&
+                    scalar(file, "PRAGMA user_version") == version && scalar(file, objects) == 1,
+                "Unsupported and unversioned populated databases are rejected without writes");
+        require(!std::filesystem::exists(file.wstring() + L"-wal") &&
+                    !std::filesystem::exists(file.wstring() + L"-shm"),
+                "Rejected formats never enable WAL or create its sidecars");
+        std::filesystem::remove(file);
+    }
+    auto file = dir / L"unversioned-view.db";
+    rawSql(file, "CREATE VIEW existing_view AS SELECT 1;");
+    auto original = bytes(file);
+    bool rejected = false;
+    try {
+        Storage db(file);
+    } catch (const std::exception &) {
+        rejected = true;
+    }
+    require(rejected && bytes(file) == original,
+            "An unversioned database with a view is not treated as empty");
+    std::filesystem::remove(file);
+
+    file = dir / L"initialization-retry.db";
+    rawSql(file, "PRAGMA user_version=0;");
+    sqlite3 *lock{};
+    require(sqlite3_open(utf8(file.wstring()).c_str(), &lock) == SQLITE_OK &&
+                sqlite3_exec(lock, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) == SQLITE_OK,
+            "Hold an isolated initialization write lock");
+    rejected = false;
+    try {
+        Storage db(file);
+    } catch (const std::exception &) {
+        rejected = true;
+    }
+    sqlite3_exec(lock, "ROLLBACK", nullptr, nullptr, nullptr);
+    sqlite3_close(lock);
+    require(rejected && scalar(file, "PRAGMA user_version") == 0 && scalar(file, objects) == 0,
+            "Failed initialization leaves an empty unversioned database");
+    {
+        Storage db(file);
+        require(scalar(file, "PRAGMA user_version") == 7 && db.reminderRules().size() == 1,
+                "Initialization can be retried after a temporary failure");
+    }
+    std::filesystem::remove(file);
+
+    file = dir / L"concurrent-initialization.db";
+    rawSql(file, "PRAGMA journal_mode=WAL;");
+    bool opened[2]{};
+    auto open = [&](int index) {
+        try {
+            Storage db(file);
+            opened[index] = db.reminderRules().size() == 1;
+        } catch (const std::exception &) {
+        }
+    };
+    std::thread first(open, 0), second(open, 1);
+    first.join();
+    second.join();
+    require(opened[0] && opened[1] && scalar(file, "PRAGMA user_version") == 7,
+            "Concurrent first opens share one complete initialization");
+    std::filesystem::remove(file);
+    std::filesystem::remove(file.wstring() + L"-wal");
+    std::filesystem::remove(file.wstring() + L"-shm");
+}
 void optimizationTests(const std::filesystem::path &dir) {
     auto file = dir / L"optimized.db";
     SYSTEMTIME local{}, utc{};
@@ -944,9 +928,9 @@ void optimizationTests(const std::filesystem::path &dir) {
     {
         Storage db(file);
         require(
-            scalar(file, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('limits','notices')") ==
-                0,
-            "New profiles never create legacy tables");
+            scalar(file, "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' "
+                         "AND name NOT GLOB 'sqlite_*'") == 7,
+            "New profiles contain the current business tables");
         require(db.applications().empty(), "Empty catalog is cached");
         db.app({"a", L"A", L"a.exe"});
         require(db.applications().empty(), "Metadata alone creates no visible application");
@@ -985,32 +969,19 @@ void optimizationTests(const std::filesystem::path &dir) {
                 "Merge invalidates catalog");
         db.commit({}, {{1, day, 12345, true, true, "keep-token"}});
     }
-    // A schema-3 profile must keep every current record and pending notification action.
-    rawSql(file, "CREATE TABLE limits(app TEXT PRIMARY KEY,duration INTEGER);"
-                 "CREATE TABLE notices(app TEXT,day TEXT,next INTEGER,muted INTEGER);PRAGMA "
-                 "user_version=3;");
     {
         Storage db(file);
         require(scalar(file, "PRAGMA user_version") == 7 && db.snapshot(day, true).total == 168000,
-                "Schema three upgrades without discarding history");
+                "Reopening the current format preserves history");
         auto state = db.reminderStates(day).front();
         require(state.token == "keep-token" && state.muted && state.next == 12345,
-                "Schema three preserves reminder state and token");
-        require(db.appMappings()["a"] == "b", "Upgrade preserves application groups");
+                "Reopening preserves reminder state and token");
+        require(db.appMappings()["a"] == "b", "Reopening preserves application groups");
         db.clear();
         require(db.snapshot(day, true).total == 0 && db.reminderRules().size() == 2 &&
                     db.applications().empty() && db.reminderStates(day).empty(),
                 "Clear resets usage and states while retaining cached catalog and rules");
     }
-    rawSql(file, "PRAGMA user_version=99;");
-    bool rejected = false;
-    try {
-        Storage db(file);
-    } catch (...) {
-        rejected = true;
-    }
-    require(rejected && scalar(file, "PRAGMA user_version") == 99,
-            "Newer schemas fail without resetting data");
     std::filesystem::remove(file);
     std::filesystem::remove(file.wstring() + L"-wal");
     std::filesystem::remove(file.wstring() + L"-shm");
@@ -1157,54 +1128,10 @@ void storageMaintenanceTests(const std::filesystem::path &dir) {
     }
     std::filesystem::remove(file);
 }
-void nameMigrationTests(const std::filesystem::path &dir) {
-    auto file = dir / L"name-migration.db";
+void nameRefreshTests(const std::filesystem::path &dir) {
+    auto file = dir / L"name-refresh.db";
     const Millis start = 1700000000000;
     auto day = localDay(start);
-    int64_t targetRule{};
-    {
-        Storage db(file);
-        db.app({"a", L"First", L"first.exe"});
-        db.app({"b", L"Second", L"second.exe"});
-        db.app({"c", L"Component", L"component.exe"});
-        db.app({"d", L"Independent", L"independent.exe"});
-        db.save({{"a", start, 1000},
-                 {"b", start + 1000, 2000},
-                 {"c", start + 3000, 3000},
-                 {"d", start + 6000, 4000}});
-        db.mergeApps("c", "b");
-        db.setReminder("a", 60000);
-        db.setReminder("b", 120000);
-        auto rules = db.reminderRules();
-        targetRule = rules.back().id;
-        db.commit({}, {{rules[1].id, day, 0, true, true, "old-a"},
-                       {targetRule, day, 305000, false, false, "old-b"}});
-    }
-    rawSql(file, "INSERT INTO app_labels VALUES('a','Same'),('b','Same');PRAGMA user_version=6;");
-    {
-        Storage db(file);
-        auto view = db.snapshot(day, false, "b");
-        require(scalar(file, "PRAGMA user_version") == 7 && db.applications().size() == 2 &&
-                    db.appMappings()["a"] == "b" && db.appMappings()["c"] == "b" &&
-                    view.selectedTotal == 6000 && view.total == 10000 && view.members.size() == 3,
-                "Schema six combines equal names while preserving the existing manual primary and "
-                "members");
-        require(scalar(file, "SELECT COUNT(*)=4 AND SUM(duration)=10000 FROM segments") == 1 &&
-                    scalar(file, "SELECT COUNT(*) FROM app_labels WHERE name='Same'") == 2,
-                "Name migration preserves every raw interval and each original source label");
-        auto state = db.reminderStates(day).front();
-        require(
-            db.reminderRules().back().id == targetRule &&
-                db.reminderRules().back().threshold == 120000 && state.muted &&
-                state.next == 306000 && state.token.empty(),
-            "Equal-name migration retains target reminder priority, silence and remaining snooze");
-        db.setPrimary("b", "a");
-        require(db.snapshot(day, false, "a").selected.app.name == L"Same" &&
-                    db.snapshot(day, false, "a").selected.app.path == L"first.exe",
-                "Migrated source labels still follow primary selection");
-    }
-    std::filesystem::remove(file);
-    file = dir / L"name-refresh.db";
     {
         Storage db(file);
         db.app({"product", L"Product", L"product.exe"});
@@ -1344,47 +1271,6 @@ void identityStorageTests(const std::filesystem::path &dir) {
                 "name");
     }
     std::filesystem::remove(file);
-
-    file = dir / L"schema4.db";
-    rawSql(file,
-           "CREATE TABLE apps(id TEXT PRIMARY KEY,name TEXT NOT NULL,path TEXT NOT NULL);"
-           "CREATE TABLE segments(id INTEGER PRIMARY KEY,app TEXT,start INTEGER,end INTEGER,"
-           "duration INTEGER,day TEXT,hour INTEGER);"
-           "CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);"
-           "CREATE TABLE app_labels(app TEXT PRIMARY KEY,name TEXT NOT NULL);"
-           "CREATE TABLE app_links(app TEXT PRIMARY KEY,target TEXT NOT NULL);"
-           "CREATE TABLE reminder_rules(id INTEGER PRIMARY KEY AUTOINCREMENT,kind INTEGER,"
-           "app TEXT UNIQUE,duration INTEGER,enabled INTEGER);"
-           "CREATE TABLE reminder_states(rule INTEGER,day TEXT,next INTEGER,notified INTEGER,"
-           "muted INTEGER,token TEXT,PRIMARY KEY(rule,day));"
-           "INSERT INTO apps VALUES('a','A','a.exe'),('b','B','b.exe'),"
-           "('unknown:1','Unknown 1',''),('unknown:2','Unknown 2',''),('empty','Empty','');"
-           "INSERT INTO segments VALUES(1,'a',1000,2000,1000,'2026-10-17',12),"
-           "(2,'unknown:1',2000,2300,300,'2026-10-17',12),"
-           "(3,'unknown:2',2300,2500,200,'2026-10-17',12);"
-           "INSERT INTO app_links VALUES('a','b');INSERT INTO app_labels VALUES('b','Custom');"
-           "INSERT INTO reminder_rules VALUES(1,0,NULL,3600000,0),(2,1,'b',60000,1);"
-           "INSERT INTO reminder_states VALUES(2,'2026-10-17',300000,0,1,'retain-token');"
-           "PRAGMA user_version=4;");
-    {
-        Storage db(file);
-        require(scalar(file, "PRAGMA user_version") == 7 &&
-                    scalar(file, "SELECT COUNT(*) FROM segments") == 3 &&
-                    scalar(file, "SELECT SUM(duration) FROM segments") == 1500,
-                "Schema four upgrade retains every interval and total");
-        require(db.appMappings()["a"] == "b" &&
-                    scalar(file, "SELECT manual FROM app_links WHERE app='a'") == 1,
-                "Schema four existing groups retain explicit ownership");
-        auto snapshot = db.snapshot("2026-10-17", false);
-        require(snapshot.total == 1500 && snapshot.unidentified == 500 &&
-                    snapshot.apps.size() == 1 && snapshot.apps[0].app.name == L"Custom" &&
-                    snapshot.apps[0].app.hasUsage,
-                "Migration consolidates unidentified rows and derives catalog activity");
-        require(db.reminderStates("2026-10-17")[0].token == "retain-token" &&
-                    db.reminderStates("2026-10-17")[0].muted,
-                "Schema four migration keeps reminder actions and silence state");
-    }
-    std::filesystem::remove(file);
 }
 } // namespace
 int wmain(int argc, wchar_t **argv) {
@@ -1408,14 +1294,15 @@ int wmain(int argc, wchar_t **argv) {
         mergeTests(dir);
         batchMergeTests(dir);
         groupManagementTests(dir);
-        migrationTests(dir);
+        corruptDatabaseTests(dir);
+        databaseFormatTests(dir);
         optimizationTests(dir);
         storageMaintenanceTests(dir);
         identityStorageTests(dir);
-        nameMigrationTests(dir);
+        nameRefreshTests(dir);
         // Files are all fixed names in this process's test directory; never touch a user profile.
         for (auto name : {L"storage.db", L"merge.db", L"batch-merge.db", L"group-management.db",
-                          L"schema5.db", L"v1.db", L"v2.db", L"midnight.db"})
+                          L"midnight.db"})
             std::filesystem::remove(dir / name);
         std::filesystem::remove(dir);
         std::cout << "PASS: " << checks << " checks\n";

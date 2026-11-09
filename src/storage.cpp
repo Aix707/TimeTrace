@@ -6,14 +6,20 @@
 
 namespace tt {
 namespace {
-constexpr const char *unknownId = "app:unidentified";
-bool hasColumn(sqlite3 *db, const char *table, const char *column) {
-    auto sql = std::string("PRAGMA table_info(") + table + ")";
-    Statement fields(db, sql.c_str());
-    while (fields.step())
-        if (fields.text(1) == column)
-            return true;
-    return false;
+int checkedSchema(sqlite3 *db) {
+    Statement version(db, "PRAGMA user_version");
+    version.step();
+    auto schema = static_cast<int>(version.integer(0));
+    if (schema == 7)
+        return schema;
+    if (schema > 7)
+        throw std::runtime_error("数据格式版本较新，请使用相应版本的 TimeTrace。");
+    if (schema != 0)
+        throw std::runtime_error("旧数据格式不受支持，请先使用 TimeTrace 1.4.2 升级数据。");
+    Statement objects(db, "SELECT 1 FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' LIMIT 1");
+    if (objects.step())
+        throw std::runtime_error("数据格式无法识别，当前版本需要 schema 7。");
+    return schema;
 }
 } // namespace
 Storage::Storage(const std::filesystem::path &path) {
@@ -30,117 +36,49 @@ Storage::Storage(const std::filesystem::path &path) {
     }
     sqlite3_busy_timeout(db_, 3000);
     try {
-        int schema = 0;
-        {
-            Statement version(db_, "PRAGMA user_version");
-            if (version.step())
-                schema = static_cast<int>(version.integer(0));
-            if (schema > 7)
-                throw std::runtime_error("This database requires a newer TimeTrace version");
-        }
+        auto schema = checkedSchema(db_);
         execSql(db_, "PRAGMA journal_mode=WAL;PRAGMA synchronous=FULL;PRAGMA foreign_keys=ON;"
                      "PRAGMA cache_size=-1024;");
         if (schema == 7)
             return;
         Transaction transaction(db_);
+        // Another connection may have initialized this empty file while we waited.
+        if (checkedSchema(db_) == 7) {
+            transaction.commit();
+            return;
+        }
         execSql(
             db_,
-            "CREATE TABLE IF NOT EXISTS apps(id TEXT PRIMARY KEY,name TEXT NOT NULL,path TEXT NOT "
+            "CREATE TABLE apps(id TEXT PRIMARY KEY,name TEXT NOT NULL,path TEXT NOT "
             "NULL,has_usage INTEGER NOT NULL DEFAULT 0 CHECK(has_usage IN (0,1)),"
-            "separate_from TEXT NOT NULL DEFAULT '');"
-            "CREATE TABLE IF NOT EXISTS segments(id INTEGER PRIMARY KEY,app TEXT NOT NULL "
+            "separate_from TEXT NOT NULL DEFAULT '',resolved_name TEXT NOT NULL DEFAULT '',"
+            "name_key TEXT NOT NULL DEFAULT '',identified INTEGER NOT NULL DEFAULT 1);"
+            "CREATE INDEX apps_name_key ON apps(name_key);"
+            "CREATE TABLE segments(id INTEGER PRIMARY KEY,app TEXT NOT NULL "
             "REFERENCES "
             "apps(id),start INTEGER NOT NULL,end INTEGER NOT NULL,duration INTEGER NOT NULL "
             "CHECK(duration>0),day TEXT NOT NULL,hour INTEGER NOT NULL);"
-            "CREATE INDEX IF NOT EXISTS segments_day ON segments(day,app);"
-            "CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);"
-            "CREATE TABLE IF NOT EXISTS app_labels(app TEXT PRIMARY KEY REFERENCES apps(id),"
+            "CREATE INDEX segments_day ON segments(day,app);"
+            "CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);"
+            "CREATE TABLE app_labels(app TEXT PRIMARY KEY REFERENCES apps(id),"
             "name TEXT NOT NULL);"
-            "CREATE TABLE IF NOT EXISTS app_links(app TEXT PRIMARY KEY REFERENCES apps(id),"
+            "CREATE TABLE app_links(app TEXT PRIMARY KEY REFERENCES apps(id),"
             "target TEXT NOT NULL REFERENCES apps(id),manual INTEGER NOT NULL DEFAULT 1 "
             "CHECK(manual IN (0,1)),CHECK(app<>target));"
-            "CREATE INDEX IF NOT EXISTS app_links_target ON app_links(target);"
-            "CREATE TABLE IF NOT EXISTS reminder_rules(id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "CREATE INDEX app_links_target ON app_links(target);"
+            "CREATE TABLE reminder_rules(id INTEGER PRIMARY KEY AUTOINCREMENT,"
             "kind INTEGER NOT NULL CHECK(kind IN (0,1)),app TEXT UNIQUE REFERENCES apps(id),"
             "duration INTEGER NOT NULL CHECK(duration>0),enabled INTEGER NOT NULL "
             "CHECK(enabled IN (0,1)),CHECK((kind=0 AND app IS NULL) OR (kind=1 AND app IS NOT "
             "NULL)));"
-            "CREATE UNIQUE INDEX IF NOT EXISTS reminder_device ON reminder_rules(kind) WHERE "
+            "CREATE UNIQUE INDEX reminder_device ON reminder_rules(kind) WHERE "
             "kind=0;"
-            "CREATE TABLE IF NOT EXISTS reminder_states(rule INTEGER NOT NULL REFERENCES "
+            "CREATE TABLE reminder_states(rule INTEGER NOT NULL REFERENCES "
             "reminder_rules(id) ON DELETE CASCADE,day TEXT NOT NULL,next INTEGER NOT NULL DEFAULT "
             "0,"
             "notified INTEGER NOT NULL DEFAULT 0,muted INTEGER NOT NULL DEFAULT 0,"
             "token TEXT NOT NULL DEFAULT '',PRIMARY KEY(rule,day));"
-            "INSERT INTO reminder_rules(kind,app,duration,enabled) SELECT 0,NULL,3600000,0 "
-            "WHERE NOT EXISTS(SELECT 1 FROM reminder_rules WHERE kind=0);");
-        // Only old profiles need this one-time conversion. New profiles have no legacy tables.
-        // Alias notices use the source's cumulative clock. Target notices already use
-        // the combined clock, so only alias thresholds need the other members' usage.
-        if (schema == 1 || schema == 2)
-            execSql(db_,
-                    "INSERT OR IGNORE INTO reminder_rules(kind,app,duration,enabled) "
-                    "SELECT 1,COALESCE(m.target,l.app),l.duration,1 FROM limits l LEFT JOIN "
-                    "app_links m ON m.app=l.app ORDER BY m.target IS NOT NULL,l.app;"
-                    "WITH raw_usage AS (SELECT app,day,SUM(duration) used FROM segments "
-                    "GROUP BY app,day),group_usage AS (SELECT COALESCE(m.target,s.app) app,"
-                    "s.day,SUM(s.duration) used FROM segments s LEFT JOIN app_links m "
-                    "ON m.app=s.app GROUP BY COALESCE(m.target,s.app),s.day),states AS ("
-                    "SELECT r.id rule,n.day,MAX(CASE WHEN n.next>0 THEN n.next+CASE WHEN "
-                    "m.target IS NOT NULL THEN COALESCE(g.used,0)-COALESCE(u.used,0) "
-                    "ELSE 0 END ELSE 0 END) next,MAX(n.muted) muted "
-                    "FROM notices n LEFT JOIN app_links m ON m.app=n.app JOIN reminder_rules r "
-                    "ON r.app=COALESCE(m.target,n.app) LEFT JOIN raw_usage u "
-                    "ON u.app=n.app AND u.day=n.day LEFT JOIN group_usage g "
-                    "ON g.app=r.app AND g.day=n.day GROUP BY r.id,n.day) "
-                    "INSERT OR REPLACE INTO reminder_states(rule,day,next,notified,muted) "
-                    "SELECT rule,day,next,muted,muted FROM states;");
-        if (!hasColumn(db_, "apps", "has_usage"))
-            execSql(db_, "ALTER TABLE apps ADD COLUMN has_usage INTEGER NOT NULL DEFAULT 0 "
-                         "CHECK(has_usage IN (0,1));");
-        if (!hasColumn(db_, "apps", "separate_from"))
-            execSql(db_, "ALTER TABLE apps ADD COLUMN separate_from TEXT NOT NULL DEFAULT '';");
-        if (!hasColumn(db_, "app_links", "manual"))
-            execSql(db_, "ALTER TABLE app_links ADD COLUMN manual INTEGER NOT NULL DEFAULT 1 "
-                         "CHECK(manual IN (0,1));");
-        execSql(db_, "UPDATE apps SET has_usage=CASE WHEN EXISTS(SELECT 1 FROM segments s WHERE "
-                     "s.app=apps.id) OR EXISTS(SELECT 1 FROM app_links m JOIN segments s ON "
-                     "s.app=m.app WHERE m.target=apps.id) THEN 1 ELSE 0 END;"
-                     "DROP TABLE IF EXISTS notices;DROP TABLE IF EXISTS limits;");
-        if (!hasColumn(db_, "apps", "resolved_name")) {
-            execSql(db_, "ALTER TABLE apps ADD COLUMN resolved_name TEXT NOT NULL DEFAULT '';"
-                         "ALTER TABLE apps ADD COLUMN name_key TEXT NOT NULL DEFAULT '';"
-                         "ALTER TABLE apps ADD COLUMN identified INTEGER NOT NULL DEFAULT 1;"
-                         "UPDATE apps SET resolved_name=name;"
-                         "UPDATE apps SET resolved_name=COALESCE((SELECT t.name FROM app_links m "
-                         "JOIN apps t ON t.id=m.target WHERE m.app=apps.id AND m.manual=0),name);"
-                         "UPDATE apps SET identified=0 WHERE id LIKE 'unknown:%' OR "
-                         "id LIKE 'unknown-frame:%' OR id='app:unidentified';");
-        }
-        execSql(db_, "CREATE INDEX IF NOT EXISTS apps_name_key ON apps(name_key);");
-        {
-            Statement names(db_, "SELECT id,resolved_name FROM apps");
-            Statement key(db_, "UPDATE apps SET name_key=?1 WHERE id=?2");
-            while (names.step()) {
-                key.reset();
-                key.text(1, applicationNameKey(wide(names.text(1))));
-                key.text(2, names.text(0));
-                key.step();
-            }
-        }
-        std::vector<std::string> unknown;
-        {
-            Statement sources(db_, "SELECT id FROM apps WHERE id LIKE 'unknown:%' OR "
-                                   "id LIKE 'unknown-frame:%'");
-            while (sources.step())
-                unknown.push_back(sources.text(0));
-        }
-        if (!unknown.empty() && canonicalId(unknownId).empty())
-            upsertApp({unknownId, L"未识别用时", {}});
-        for (const auto &id : unknown)
-            if (canonicalId(id) == id)
-                mergeRoots(id, unknownId, false);
-        regroupNames();
+            "INSERT INTO reminder_rules(kind,app,duration,enabled) VALUES(0,NULL,3600000,0);");
         execSql(db_, "PRAGMA user_version=7;");
         transaction.commit();
     } catch (...) {

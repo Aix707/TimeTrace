@@ -26,7 +26,8 @@ tests = proof["tests"]
 native = proof["lifecycle"]
 resource = proof["resource"]
 upgrade = proof["local_upgrade"]
-migration = proof["data_copy"]
+database = proof["data_copy"]
+cleanup = proof["cleanup"]
 exe = proof["artifacts"]["TimeTrace.exe"]
 setup = proof["artifacts"][f"TimeTrace-{VERSION}-Setup.exe"]
 cpu = resource["average_cpu_percent"]
@@ -37,32 +38,20 @@ lines = [
     "## 回归与数据", "",
     f"- 核心及存储 {tests['core']} 项，隔离安装注册 {tests['integration']} 项，服务 {tests['service']} 项，识别 {tests['identity']} 项，界面状态 {tests['ui']} 项，通知动作 {tests['notification_actions']} 项，共 {sum(tests.values())} 项通过。",
     "- 覆盖识别缓存失效、事务回滚重试、主来源切回、成员移出与重新合并、提醒图标、焦点重排及绘图失败恢复。",
+    "- 覆盖空库直接初始化、当前格式重复打开、其他格式原文件保留、未标记版本的非空数据库拒绝，以及初始化失败重试和并发首次打开。",
     f"- 原生窗口开关 {native['cycles']} 次，先预热 {native['warmup_cycles']} 次，再检查 {native['measured_cycles']} 次。来源管理、提醒、重命名、合并、键盘导航及取消清除均通过。",
     f"- GDI 句柄 {native['baseline_gdi_handles']} → {native['final_gdi_handles']}，USER 句柄 {native['baseline_user_handles']} → {native['final_user_handles']}。关闭窗口后的私有工作集约 {native['private_working_set_after_cycles']/1e6:.3f} MB。",
-    f"- 真实数据副本包含 {migration['applications']} 个来源、{migration['intervals']:,} 条原始区间。schema 7、七张业务表、记录哈希及总量核对通过。",
+    f"- 真实数据副本包含 {database['applications']} 个来源、{database['intervals']:,} 条原始区间。schema 7、七张业务表、数据库定义、自增计数、记录哈希及总量核对通过。",
     f"- 本机升级前已备份，{upgrade['intervals']:,} 条原始区间及七张业务表在恢复采集前严格比对一致。通知身份、协议、快捷方式及开机启动设置核对通过。", "",
     "## 资源与体积", "",
     f"- 已安装的最终文件预热 {resource['warmup_seconds']} 秒后测量 {resource['measured_seconds']:.1f} 秒，共 {resource['samples']} 个样本。界面关闭、进程持续运行。",
     f"- 平均 CPU 为 {cpu_text}，按整机总算力计算。私有工作集峰值 {resource['peak_private_working_set_bytes']/1e6:.3f} MB，测量期变化 {resource['private_working_set_growth_bytes']/1e6:+.3f} MB。",
     f"- 主程序 {exe['bytes']:,} 字节，离线安装包 {setup['bytes']:,} 字节，全部安装文件合计 {upgrade['installed_bytes']:,} 字节。",
     "- 本次资源和体积核验满足平均 CPU ≤0.5%、私有工作集峰值 ≤50 MB、安装包 ≤10 MB、安装文件合计 ≤30 MB。", "",
-    "## 优化性能对照", "",
-    "以下对照来自版本号调整前的优化实现。新旧各运行 10 轮，前 5 轮原版先运行，后 5 轮交换顺序，采用 48 应用、60 天及 72,000 条合成区间。", "",
-    "| 项目 | 原版中位数 ms | 优化版中位数 ms | 同轮耗时比值中位数 |",
-    "|---|---|---|---|",
-]
-reference = proof["optimization_reference"]
-labels = {"seed_ms": "写入全部区间", "commit_ms": "小批提交", "daily_query_ms": "日概览",
-          "weekly_query_ms": "周详情", "catalog_refresh_ms": "48 来源重复登记",
-          "member_query_ms": "8 成员详情"}
-for key, label in labels.items():
-    old = reference["benchmark_medians_ms"]["baseline"][key]
-    new = reference["benchmark_medians_ms"]["optimized"][key]
-    change = reference["paired_time_change_percent"][key]
-    lines.append(f"| {label} | {old:.3f} | {new:.3f} | {change:+.1f}% |")
-lines += [
-    "", "负值表示耗时减少。小批提交受同步写盘及负载波动影响，两种统计口径同时保留。", "",
-    f"对照优化程序 SHA-256 为 `{reference['binary_sha256']}`。", "",
+    "## 精简结果", "",
+    f"- 数据库实现由 {cleanup['storage_lines_before']} 行整理为 {cleanup['storage_lines_after']} 行。旧格式转换、补列检测及迁移专用数据整理代码已删除。",
+    f"- 主程序从 {cleanup['binary_bytes_before']:,} 字节减少到 {exe['bytes']:,} 字节，安装包从 {cleanup['installer_bytes_before']:,} 字节减少到 {setup['bytes']:,} 字节。",
+    "- 数据格式以 schema 7 为基线，新库在事务内直接建立完整结构。旧格式数据可先使用 1.4.2 转为 schema 7。", "",
     "## 发布核验", "",
     "- 本机安装程序与发布主程序 SHA-256 一致，已恢复托盘运行。",
     f"- 主程序 SHA-256 为 `{exe['sha256']}`。",

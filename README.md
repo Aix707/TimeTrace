@@ -6,13 +6,13 @@ TimeTrace 是一个轻量、完全离线的 Windows 11 x64 屏幕时间应用。
 
 ![TimeTrace 使用概览](docs/overview.png)
 
-1.4.2 优化前台识别、应用归类、成员查询与界面资源管理，并修正主来源切换和刷新后的键盘焦点。[更新说明](docs/RELEASE-1.4.2.md) · [界面规范](docs/DESIGN.md)
+1.4.3 以 schema 7 为数据基线，精简数据库初始化及相关测试。[更新说明](docs/RELEASE-1.4.3.md) · [界面规范](docs/DESIGN.md)
 
 ## 安装与使用
 
-下载 `TimeTrace-1.4.2-Setup.exe` 按用户安装，或下载 `TimeTrace.exe` 直接运行。源码包 `TimeTrace-1.4.2-Source.zip` 和校验文件 `SHA256SUMS.txt` 随发行版提供。[公开发行版](https://github.com/Aix707/TimeTrace/releases/latest)
+下载 `TimeTrace-1.4.3-Setup.exe` 按用户安装，或下载 `TimeTrace.exe` 直接运行。源码包 `TimeTrace-1.4.3-Source.zip` 和校验文件 `SHA256SUMS.txt` 随发行版提供。[公开发行版](https://github.com/Aix707/TimeTrace/releases/latest)
 
-安装默认不开机启动。升级时选择原安装目录，无需先卸载。首次运行将 schema 1—6 自动升级至 schema 7，保留使用记录、自定义名称、手动分组和提醒配置。升级前退出旧版并备份数据目录。
+安装默认不开机启动。升级时选择原安装目录。当前版本使用 schema 7，首次运行会直接建立该格式，已有 schema 7 数据可直接使用。旧格式数据请先通过 1.4.2 升级至 schema 7，再安装本版本。[1.4.2 安装包](https://github.com/Aix707/TimeTrace/releases/tag/v1.4.2)
 
 - **使用概览** 查看当天、本周及历史使用趋势，点击应用查看详情。排行仅展示所选时段有用时的应用，不足一秒显示“不足1秒”。
 - **提醒** 同一页提供休息提醒和应用提醒。休息提醒默认关闭，预设 60 分钟。应用提醒可添加、修改、删除。两者时长均为 1—1440 分钟。
